@@ -426,7 +426,8 @@ fn env_generates_bash_script() {
         .args(["env", "bash"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("gt()"));
+        .stdout(predicate::str::contains("gtr()"))
+        .stdout(predicate::str::contains("gtrsw"));
 }
 
 #[test]
@@ -436,7 +437,8 @@ fn env_generates_fish_script() {
         .args(["env", "fish"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("function gt"));
+        .stdout(predicate::str::contains("function gtr"))
+        .stdout(predicate::str::contains("gtrsw"));
 }
 
 #[test]
@@ -446,7 +448,20 @@ fn env_generates_posix_script() {
         .args(["env", "posix"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("gt()"));
+        .stdout(predicate::str::contains("gtr()"))
+        .stdout(predicate::str::contains("gtrsw"));
+}
+
+#[test]
+fn env_custom_alias() {
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .args(["env", "bash", "--alias", "mygt"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mygt()"))
+        .stdout(predicate::str::contains("mygtsw"))
+        .stdout(predicate::str::contains("gtr()").not());
 }
 
 #[test]

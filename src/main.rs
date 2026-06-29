@@ -83,7 +83,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             completions::run_complete_branches()?;
         }
         Commands::Env(args) => {
-            env::run(&args.shell)?;
+            env::run(&args.shell, &args.alias)?;
         }
 
         // Commands that need a wrapper.

@@ -99,9 +99,11 @@ pub enum Commands {
     /// Remove stale worktrees and delete branches gone from remote.
     Clean(CleanArgs),
 
-    /// Generate shell integration script (defines `gt` and `gtsw`).
+    /// Generate shell integration script (defines `gtr` and `gtrsw`).
     ///
     /// Usage: `eval "$(gitree env bash)"`
+    ///
+    /// Pass `--alias <name>` to customise the function name (default: `gtr`).
     Env(EnvArgs),
 
     /// Generate shell completion script.
@@ -237,6 +239,10 @@ pub struct CleanArgs {
 pub struct EnvArgs {
     /// Shell to generate integration for.
     pub shell: String,
+
+    /// Name for the shell function (default: `gtr`).
+    #[arg(long, default_value = "gtr")]
+    pub alias: String,
 }
 
 /// Arguments for `gitree completion`.

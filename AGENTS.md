@@ -142,9 +142,10 @@ All subcommand definitions live in `src/cli.rs`. Use clap derive with:
 
 ### Shell integration
 
-`src/env.rs` generates shell scripts for bash/zsh/fish/posix. The `gt()`
-function is a dispatcher: `gt sw <branch>` does native `cd` (via `eval`),
-everything else passes through to `gitree`. The `gtsw` alias is `gt sw`.
+`src/env.rs` generates shell scripts for bash/zsh/fish/posix. The `gtr()`
+function is a dispatcher: `gtr sw <branch>` does native `cd` (via `eval`),
+everything else passes through to `gitree`. The `gtrsw` alias is `gtr sw`.
+The function name is configurable via `gitree env <shell> --alias <name>`.
 
 ### Output style
 

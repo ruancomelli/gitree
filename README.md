@@ -49,9 +49,16 @@ gitree env fish | source
 ```
 
 This defines:
-- `gt` — dispatcher: `gt sw <branch>` changes directory natively, everything
-  else passes through to `gitree` (e.g. `gt add main`, `gt ls`, `gt pull`).
-- `gtsw` — alias for `gt sw` (switch worktree with native `cd`).
+- `gtr` — dispatcher: `gtr sw <branch>` changes directory natively, everything
+  else passes through to `gitree` (e.g. `gtr add main`, `gtr ls`, `gtr pull`).
+- `gtrsw` — alias for `gtr sw` (switch worktree with native `cd`).
+
+Pass `--alias <name>` to customise the function name (e.g. if `gtr` conflicts
+with an existing alias):
+
+```sh
+eval "$(gitree env bash --alias gwt)"
+```
 
 ### Shell completions
 
@@ -111,7 +118,7 @@ cd main
 | `gitree status` | | Show status overview of all worktrees |
 | `gitree doctor` | | Health check for the wrapper |
 | `gitree clean` | | Remove stale worktrees and branches |
-| `gitree env <shell>` | | Generate shell integration script |
+| `gitree env <shell> [--alias <name>]` | | Generate shell integration script |
 | `gitree completion <shell>` | | Generate shell completions |
 
 ### `gitree init <url> [--name <dir>]`
@@ -161,7 +168,7 @@ directory).
 
 ### `gitree switch <branch>`
 
-Prints a `cd` command for the worktree. Use with `eval` or the `gt` shell
+Prints a `cd` command for the worktree. Use with `eval` or the `gtr` shell
 function:
 
 ```sh
@@ -169,7 +176,7 @@ function:
 eval "$(gitree switch main)"
 
 # With shell integration (recommended)
-gtsw main
+gtrsw main
 ```
 
 ### `gitree where <branch>`
@@ -210,9 +217,10 @@ clean? `.shared/` exists?
 Prunes stale worktree references, fetches with `--prune`, and identifies local
 branches whose remote counterpart is gone. Use `--force` to delete them.
 
-### `gitree env <shell>`
+### `gitree env <shell> [--alias <name>]`
 
-Generates shell integration script that defines `gt` and `gtsw`.
+Generates shell integration script that defines `gtr` and `gtrsw` (or
+`<alias>` and `<alias>sw` with `--alias`).
 
 ### `gitree completion <shell>`
 
@@ -250,15 +258,15 @@ gitree warns you about this after each `add`. Fix: remove the trailing slash:
 ```sh
 # Start a new feature
 gitree add feature/my-feature --new
-gtsw feature/my-feature
+gtrsw feature/my-feature
 npm install
 
 # Switch context (no stashing, no WIP commits)
-gtsw main
+gtrsw main
 
 # Code review
 gitree add pr-review      # checks out origin/pr-review
-gtsw pr-review
+gtrsw pr-review
 npm install
 # ... review, test ...
 gitree remove pr-review

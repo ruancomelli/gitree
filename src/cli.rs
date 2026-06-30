@@ -114,8 +114,18 @@ pub enum Commands {
     Mangen(MangenArgs),
 
     /// Internal: dynamic branch completion.
+    ///
+    /// `gitree __complete <context>` prints branch names suitable for TAB
+    /// completion, scoped to the given subcommand context:
+    ///
+    /// - `add` (default): branches not already checked out as a worktree.
+    /// - `remove` / `switch` / `where`: branches that are worktrees.
+    /// - `base`: all local + remote branches (for `add --base`).
     #[command(name = "__complete", hide = true)]
-    Complete,
+    Complete {
+        /// Subcommand context: `add`, `remove`, `switch`, `where`, or `base`.
+        context: Option<String>,
+    },
 }
 
 /// Arguments for `gitree init`.

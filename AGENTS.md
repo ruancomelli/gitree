@@ -93,7 +93,7 @@ src/
 ├── clean.rs           # `gitree clean` — prune + delete stale branches
 ├── env.rs             # `gitree env <shell>` — shell integration (gt, gtsw)
 ├── shared.rs          # .shared/ symlink fan-out + gitignore gotcha detection
-├── completions.rs     # Shell completion + manpage generation
+├── completions.rs     # Shell completion (bash/zsh/fish + dynamic branch completion), manpage generation
 └── format.rs          # ColorPolicy, WorktreeRow, text/JSON rendering
 
 tests/

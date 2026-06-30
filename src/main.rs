@@ -79,8 +79,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Mangen(args) => {
             completions::run_mangen(&args.dir, Cli::command())?;
         }
-        Commands::Complete => {
-            completions::run_complete_branches()?;
+        Commands::Complete { context } => {
+            completions::run_complete_branches(context.as_deref())?;
         }
         Commands::Env(args) => {
             env::run(&args.shell, &args.alias)?;

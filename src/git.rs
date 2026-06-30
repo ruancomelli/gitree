@@ -158,7 +158,7 @@ impl Git {
     }
 
     /// Returns all remote branch names (without the `refs/remotes/origin/`
-    /// prefix), excluding `HEAD`.
+    /// prefix), excluding `HEAD` and the `origin/HEAD` symref.
     ///
     /// # Errors
     ///
@@ -167,6 +167,10 @@ impl Git {
         let out = self.run(&["branch", "--remote", "--list", "--format=%(refname:short)"])?;
         Ok(out
             .lines()
+            // The short name of `refs/remotes/origin/HEAD` is `origin`;
+            // skip it before stripping so a real `origin/origin` branch
+            // would survive.
+            .filter(|l| *l != "origin")
             .map(|l| {
                 l.strip_prefix("origin/")
                     .map(String::from)

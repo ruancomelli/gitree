@@ -515,3 +515,289 @@ fn clean_runs_successfully() {
         .assert()
         .success();
 }
+
+// ---------------------------------------------------------------------------
+// Dynamic branch completion (`gitree __complete`)
+// ---------------------------------------------------------------------------
+
+/// Helper: creates a gitree repo, adds `main` worktree, and creates a
+/// `feature/test` local branch and a `remote-only` branch on the source
+/// (fetched into the wrapper).  Returns `(tmp, wrapper, src)`.
+fn create_completion_repo() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let (tmp, wrapper) = create_gitree_repo();
+
+    let src = tmp.path().join("source.git");
+
+    // Create a local branch in the bare repo.
+    git(&wrapper, &["branch", "feature/test"]);
+
+    // Create a remote-only branch in the source and fetch it.
+    git(&src, &["branch", "remote-only"]);
+    git(&wrapper, &["fetch", "origin"]);
+
+    // Add the main worktree so it shows up as an active worktree.
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    (tmp, wrapper, src)
+}
+
+#[test]
+fn complete_add_lists_branches_without_worktrees() {
+    let (_tmp, wrapper, _src) = create_completion_repo();
+
+    let output = AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["__complete", "add"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let branches: Vec<&str> = std::str::from_utf8(&output).unwrap().lines().collect();
+
+    // feature/test and remote-only have no worktree → should appear.
+    assert!(
+        branches.contains(&"feature/test"),
+        "add should list feature/test: {branches:?}"
+    );
+    assert!(
+        branches.contains(&"remote-only"),
+        "add should list remote-only: {branches:?}"
+    );
+    // main has a worktree → should NOT appear.
+    assert!(
+        !branches.contains(&"main"),
+        "add should not list main: {branches:?}"
+    );
+}
+
+#[test]
+fn complete_default_context_matches_add() {
+    let (_tmp, wrapper, _src) = create_completion_repo();
+
+    let with_ctx = AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["__complete", "add"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let without_ctx = AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["__complete"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(with_ctx, without_ctx);
+}
+
+#[test]
+fn complete_remove_lists_worktree_branches() {
+    let (_tmp, wrapper, _src) = create_completion_repo();
+
+    let output = AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["__complete", "remove"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let branches: Vec<&str> = std::str::from_utf8(&output).unwrap().lines().collect();
+
+    assert!(
+        branches.contains(&"main"),
+        "remove should list main: {branches:?}"
+    );
+    assert!(
+        !branches.contains(&"feature/test"),
+        "remove should not list feature/test: {branches:?}"
+    );
+    assert!(
+        !branches.contains(&"remote-only"),
+        "remove should not list remote-only: {branches:?}"
+    );
+}
+
+#[test]
+fn complete_switch_lists_worktree_branches() {
+    let (_tmp, wrapper, _src) = create_completion_repo();
+
+    let output = AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["__complete", "switch"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let branches: Vec<&str> = std::str::from_utf8(&output).unwrap().lines().collect();
+
+    assert!(branches.contains(&"main"));
+    assert!(!branches.contains(&"feature/test"));
+}
+
+#[test]
+fn complete_where_lists_worktree_branches() {
+    let (_tmp, wrapper, _src) = create_completion_repo();
+
+    let output = AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["__complete", "where"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let branches: Vec<&str> = std::str::from_utf8(&output).unwrap().lines().collect();
+
+    assert!(branches.contains(&"main"));
+    assert!(!branches.contains(&"feature/test"));
+}
+
+#[test]
+fn complete_base_lists_all_branches() {
+    let (_tmp, wrapper, _src) = create_completion_repo();
+
+    let output = AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["__complete", "base"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let branches: Vec<&str> = std::str::from_utf8(&output).unwrap().lines().collect();
+
+    // base lists everything, including worktree branches.
+    assert!(branches.contains(&"main"));
+    assert!(branches.contains(&"feature/test"));
+    assert!(branches.contains(&"remote-only"));
+}
+
+#[test]
+fn complete_outside_wrapper_prints_nothing() {
+    let tmp = TempDir::new().unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(tmp.path())
+        .args(["__complete", "add"])
+        .assert()
+        .success()
+        .stdout("");
+}
+
+// ---------------------------------------------------------------------------
+// Completion script generation contains dynamic overrides
+// ---------------------------------------------------------------------------
+
+#[test]
+fn completion_bash_contains_dynamic_overrides() {
+    let output = AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .args(["completion", "bash"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let script = std::str::from_utf8(&output).unwrap();
+    assert!(
+        script.contains("gitree __complete add"),
+        "bash script should reference `gitree __complete add`"
+    );
+    assert!(script.contains("gitree __complete base"));
+    assert!(script.contains("gitree __complete \"${sub}\""));
+    assert!(script.contains("__gitree_clap_orig"));
+}
+
+#[test]
+fn completion_zsh_contains_dynamic_overrides() {
+    let output = AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .args(["completion", "zsh"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let script = std::str::from_utf8(&output).unwrap();
+    assert!(
+        script.contains("_gitree_complete_add"),
+        "zsh script should define _gitree_complete_add"
+    );
+    assert!(script.contains("_gitree_complete_remove"));
+    assert!(script.contains("_gitree_complete_switch"));
+    assert!(script.contains("_gitree_complete_where"));
+    assert!(script.contains("_gitree_complete_base"));
+    assert!(script.contains("gitree __complete add"));
+    // The _default tag should have been replaced.
+    assert!(
+        !script.contains("Branch name to create a worktree for:_default"),
+        "zsh script should not retain the _default action for add"
+    );
+}
+
+#[test]
+fn completion_fish_contains_dynamic_overrides() {
+    let output = AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .args(["completion", "fish"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let script = std::str::from_utf8(&output).unwrap();
+    assert!(
+        script.contains("gitree __complete add"),
+        "fish script should reference `gitree __complete add`"
+    );
+    assert!(script.contains("gitree __complete remove"));
+    assert!(script.contains("gitree __complete switch"));
+    assert!(script.contains("gitree __complete where"));
+    assert!(script.contains("gitree __complete base"));
+}
+
+#[test]
+fn completion_powershell_unchanged() {
+    // PowerShell is not in the override list; output should be the raw
+    // clap_complete script with no gitree __complete references.
+    let output = AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .args(["completion", "powershell"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let script = std::str::from_utf8(&output).unwrap();
+    assert!(!script.contains("gitree __complete"));
+}

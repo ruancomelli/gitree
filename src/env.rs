@@ -6,7 +6,9 @@ use crate::error::{GitreeError, Result};
 
 /// Generates and prints shell integration script.
 ///
-/// Defines `<alias>()` (dispatcher) and `<alias>sw` (switch with native `cd`).
+/// Defines `<alias>()` (dispatcher) and `<alias>sw` (switch with native `cd`),
+/// and wires up shell completions so that `<alias>` delegates to the
+/// `gitree` completion function installed via `gitree completion <shell>`.
 ///
 /// # Errors
 ///
@@ -14,7 +16,8 @@ use crate::error::{GitreeError, Result};
 pub fn run(shell: &str, alias: &str) -> Result<()> {
     validate_alias(alias)?;
     let script = match shell {
-        "bash" | "zsh" => bash_script(alias),
+        "bash" => bash_script(alias),
+        "zsh" => zsh_script(alias),
         "fish" => fish_script(alias),
         "posix" | "sh" => posix_script(alias),
         _ => {
@@ -59,13 +62,11 @@ fn switch_alias(alias: &str) -> String {
     format!("{alias}sw")
 }
 
-fn bash_script(alias: &str) -> String {
+/// Shared function + alias definitions for bash and zsh (identical syntax).
+fn bash_zsh_core(alias: &str) -> String {
     let sw = switch_alias(alias);
     format!(
-        r#"# gitree shell integration for bash/zsh
-# Usage: eval "$(gitree env bash)"
-
-# {alias}() — dispatcher: `{alias} sw <branch>` does native cd, everything
+        r#"# {alias}() — dispatcher: `{alias} sw <branch>` does native cd, everything
 # else passes through to gitree.
 {alias}() {{
     if [[ "$1" == "sw" || "$1" == "switch" ]]; then
@@ -80,6 +81,53 @@ fn bash_script(alias: &str) -> String {
 # {sw} — switch to a worktree (changes directory natively)
 alias {sw}='{alias} sw'
 "#
+    )
+}
+
+fn bash_script(alias: &str) -> String {
+    let lazy = format!("_{alias}_complete");
+    format!(
+        r#"# gitree shell integration for bash
+# Usage: eval "$(gitree env bash)"
+
+{core}
+# Completions: {alias} delegates to the gitree bash completion function
+# (installed via `gitree completion bash`).  The completion file is loaded
+# lazily because it may not be sourced yet when {alias} is first completed.
+{lazy}() {{
+    if ! declare -F _gitree >/dev/null 2>&1; then
+        local f
+        for f in \
+            "${{XDG_DATA_HOME:-$HOME/.local/share}}/bash-completion/completions/gitree" \
+            "/usr/share/bash-completion/completions/gitree" \
+            "/etc/bash_completion.d/gitree"; do
+            [[ -f "$f" ]] && source "$f" && break
+        done
+    fi
+    if declare -F _gitree >/dev/null 2>&1; then
+        _gitree "$@"
+    fi
+}}
+complete -F {lazy} {alias}
+"#,
+        core = bash_zsh_core(alias)
+    )
+}
+
+fn zsh_script(alias: &str) -> String {
+    format!(
+        r#"# gitree shell integration for zsh
+# Usage: eval "$(gitree env zsh)"
+
+{core}
+# Completions: {alias} delegates to the gitree zsh completion function
+# (installed via `gitree completion zsh`).  `compdef` is available after
+# `compinit`; guard in case this script is sourced before compinit runs.
+if command -v compdef >/dev/null 2>&1; then
+    compdef _gitree {alias}
+fi
+"#,
+        core = bash_zsh_core(alias)
     )
 }
 
@@ -100,8 +148,20 @@ function {alias}
     end
 end
 
-# {sw} — switch to a worktree (changes directory natively)
-alias {sw}='{alias} sw'
+# {sw} — switch to a worktree (changes directory natively).
+# Defined as a function (not `alias {sw}="{alias} sw"`) so that its
+# `--wraps` is `gitree switch`, giving branch-name TAB completion.  An alias
+# would set `--wraps` to `{alias} sw`, and clap's fish completions only match
+# the canonical subcommand name `switch`, so branch completion would never
+# fire.
+function {sw} --wraps='gitree switch' --description='switch to a worktree'
+    {alias} sw $argv
+end
+
+# Completion: {alias} delegates to gitree.  The gitree.fish completion rules
+# (installed via `gitree completion fish`) are applied to {alias} via fish's
+# --wraps mechanism.
+complete --command {alias} --wraps gitree
 "#
     )
 }
@@ -143,6 +203,8 @@ mod tests {
         assert!(script.contains("gtr()"));
         assert!(script.contains("gtrsw"));
         assert!(script.contains("gitree switch"));
+        assert!(script.contains("complete -F _gtr_complete gtr"));
+        assert!(script.contains("_gtr_complete"));
     }
 
     #[test]
@@ -150,21 +212,42 @@ mod tests {
         let script = bash_script("mygt");
         assert!(script.contains("mygt()"));
         assert!(script.contains("mygtsw"));
+        assert!(script.contains("complete -F _mygt_complete mygt"));
         assert!(!script.contains("gtr"));
+    }
+
+    #[test]
+    fn zsh_script_default_alias() {
+        let script = zsh_script("gtr");
+        assert!(script.contains("gtr()"));
+        assert!(script.contains("gtrsw"));
+        assert!(script.contains("compdef _gitree gtr"));
+    }
+
+    #[test]
+    fn zsh_script_custom_alias() {
+        let script = zsh_script("wt");
+        assert!(script.contains("wt()"));
+        assert!(script.contains("wtsw"));
+        assert!(script.contains("compdef _gitree wt"));
     }
 
     #[test]
     fn fish_script_default_alias() {
         let script = fish_script("gtr");
-        assert!(script.contains("function gtr"));
-        assert!(script.contains("gtrsw"));
+        assert!(script.contains("function gtr\n"));
+        assert!(script.contains("function gtrsw --wraps='gitree switch'"));
+        assert!(script.contains("gtr sw $argv"));
+        assert!(script.contains("complete --command gtr --wraps gitree"));
     }
 
     #[test]
     fn fish_script_custom_alias() {
         let script = fish_script("wt");
-        assert!(script.contains("function wt"));
-        assert!(script.contains("wtsw"));
+        assert!(script.contains("function wt\n"));
+        assert!(script.contains("function wtsw --wraps='gitree switch'"));
+        assert!(script.contains("wt sw $argv"));
+        assert!(script.contains("complete --command wt --wraps gitree"));
     }
 
     #[test]

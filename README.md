@@ -53,8 +53,7 @@ This defines:
   else passes through to `gitree` (e.g. `gtr add main`, `gtr ls`, `gtr pull`).
 - `gtrsw` — alias for `gtr sw` (switch worktree with native `cd`).
 
-Pass `--alias <name>` to customise the function name (e.g. if `gtr` conflicts
-with an existing alias):
+The `gtr` and `gtrsw` names are configurable via `--alias <name>`:
 
 ```sh
 eval "$(gitree env bash --alias gwt)"
@@ -72,6 +71,11 @@ gitree completion zsh > "${fpath[1]}/_gitree"
 # Fish
 gitree completion fish > ~/.config/fish/completions/gitree.fish
 ```
+
+The `gitree env` script (above) automatically wires `gtr` and `gtrsw` to these
+completions, so `gtr l<TAB>` offers `list`, `gtrsw <branch><TAB>` offers branch
+names, etc. The completion file must be installed separately (the `env` script
+only adds the wiring; the candidate rules come from `gitree completion`).
 
 ### Manpages
 

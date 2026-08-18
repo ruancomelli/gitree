@@ -147,6 +147,17 @@ function is a dispatcher: `gtr sw <branch>` does native `cd` (via `eval`),
 everything else passes through to `gitree`. The `gtrsw` alias is `gtr sw`.
 The function name is configurable via `gitree env <shell> --alias <name>`.
 
+Each env script also wires up completions so `gtr`/`gtrsw` reuse the rules
+installed by `gitree completion <shell>`:
+- **fish:** `complete --command <alias> --wraps gitree`, and `gtrsw` is a
+  function with `--wraps='gitree switch'` (not an alias) so branch-name
+  completion fires — an alias would set `--wraps='gtr sw'`, and clap's fish
+  completions only match the canonical subcommand name `switch`, not `sw`.
+- **bash:** a lazy `_gtr_complete` loader sources the gitree bash completion
+  file from standard paths on first use (the file may not be sourced yet when
+  `gtr` is first completed), then delegates to `_gitree`.
+- **zsh:** `compdef _gitree <alias>` (guarded on `compdef` availability).
+
 ### Output style
 
 - **Git-style output:** clean, unindented lines. No boxes, panels, or

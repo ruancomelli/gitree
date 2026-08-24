@@ -3,7 +3,7 @@
 use std::io::IsTerminal;
 
 use crate::error::{GitreeError, Result};
-use crate::format::{self, ColorPolicy, WorktreeRow};
+use crate::format::{self, ColorPolicy, PathPolicy, WorktreeRow};
 use crate::git::Git;
 use crate::repo::Wrapper;
 use crate::shared;
@@ -184,6 +184,8 @@ pub struct ListOptions {
     pub json: bool,
     /// Color policy.
     pub color: ColorPolicy,
+    /// Path display policy.
+    pub path: PathPolicy,
 }
 
 impl Default for ListOptions {
@@ -191,6 +193,7 @@ impl Default for ListOptions {
         Self {
             json: false,
             color: ColorPolicy::Auto,
+            path: PathPolicy::Relative,
         }
     }
 }
@@ -204,6 +207,10 @@ pub fn run_list(wrapper: &Wrapper, opts: ListOptions) -> Result<()> {
     let git = wrapper.git();
     let entries = git.worktree_list()?;
 
+    let cwd = std::env::current_dir()?;
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let home_ref = home.as_deref();
+
     let rows: Vec<WorktreeRow> = entries
         .iter()
         .filter(|e| !e.bare)
@@ -212,7 +219,7 @@ pub fn run_list(wrapper: &Wrapper, opts: ListOptions) -> Result<()> {
                 .git_for(e.path.as_path())
                 .is_dirty()
                 .unwrap_or(false);
-            WorktreeRow::from_entry(e, dirty)
+            WorktreeRow::from_entry(e, dirty, opts.path, &cwd, home_ref)
         })
         .collect();
 
@@ -287,5 +294,6 @@ mod tests {
         let opts = ListOptions::default();
         assert!(!opts.json);
         assert_eq!(opts.color, ColorPolicy::Auto);
+        assert_eq!(opts.path, PathPolicy::Relative);
     }
 }

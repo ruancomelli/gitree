@@ -31,6 +31,7 @@ my-project/              ← wrapper (never work here directly)
   (application-level context chaining in `main.rs`)
 - **Serialization:** `serde` + `serde_json` (for `--json` output)
 - **Glob matching:** `globset` (for `foreach --only`)
+- **Relative path computation:** `pathdiff` (for `gitree list --path relative`)
 - **No async.** All operations are synchronous.
 - **No git crate.** gitree shells out to the real `git` binary via
   `std::process::Command`.

@@ -1,6 +1,7 @@
-//! Output formatting: color policy, text and JSON rendering for `gitree list`.
+//! Output formatting: color policy, path policy, text and JSON rendering for `gitree list`.
 
 use std::io::Write;
+use std::path::Path;
 
 use crate::git::WorktreeEntry;
 use serde::{Deserialize, Serialize};
@@ -30,13 +31,65 @@ impl ColorPolicy {
     }
 }
 
+/// How worktree paths are displayed by `gitree list`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Deserialize, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PathPolicy {
+    /// Paths relative to the current working directory.
+    #[default]
+    Relative,
+    /// Absolute paths.
+    Absolute,
+    /// Absolute paths with the user's home directory shown as `~`.
+    Abbreviated,
+}
+
+impl PathPolicy {
+    /// Formats `path` for display according to this policy.
+    ///
+    /// `cwd` is the directory the path should be made relative to when the
+    /// policy is [`PathPolicy::Relative`]. `home` is the directory that will
+    /// be replaced by `~` when the policy is [`PathPolicy::Abbreviated`].
+    ///
+    /// When `Relative` and `path` is not reachable from `cwd` (e.g. they
+    /// share no common ancestor on Windows), the absolute path is returned
+    /// as a fallback.
+    #[must_use]
+    pub fn format(self, path: &Path, cwd: &Path, home: Option<&Path>) -> String {
+        match self {
+            Self::Relative => pathdiff::diff_paths(path, cwd)
+                .map(|rel| {
+                    if rel.as_os_str().is_empty() {
+                        ".".into()
+                    } else {
+                        rel.display().to_string()
+                    }
+                })
+                .unwrap_or_else(|| path.display().to_string()),
+            Self::Absolute => path.display().to_string(),
+            Self::Abbreviated => match home {
+                Some(home) if path.starts_with(home) => {
+                    let rest = path.strip_prefix(home).unwrap_or(path);
+                    if rest.as_os_str().is_empty() {
+                        "~".into()
+                    } else {
+                        format!("~/{}", rest.display())
+                    }
+                }
+                _ => path.display().to_string(),
+            },
+        }
+    }
+}
+
 /// A row in the worktree list output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeRow {
     /// The branch name (or `"(detached)"` if no branch).
     pub branch: String,
-    /// The worktree filesystem path.
-    pub path: String,
+    /// The worktree filesystem path, formatted per the requested [`PathPolicy`].
+    #[serde(rename = "path")]
+    pub path_str: String,
     /// The short HEAD hash.
     pub head: String,
     /// Whether the worktree has uncommitted changes.
@@ -45,11 +98,20 @@ pub struct WorktreeRow {
 
 impl WorktreeRow {
     /// Builds a [`WorktreeRow`] from a [`WorktreeEntry`].
+    ///
+    /// `path`, `cwd`, and `home` control how the worktree filesystem path is
+    /// rendered (see [`PathPolicy::format`]).
     #[must_use]
-    pub fn from_entry(entry: &WorktreeEntry, dirty: bool) -> Self {
+    pub fn from_entry(
+        entry: &WorktreeEntry,
+        dirty: bool,
+        path: PathPolicy,
+        cwd: &Path,
+        home: Option<&Path>,
+    ) -> Self {
         Self {
             branch: entry.branch.clone().unwrap_or_else(|| "(detached)".into()),
-            path: entry.path.display().to_string(),
+            path_str: path.format(&entry.path, cwd, home),
             head: entry
                 .head
                 .as_deref()
@@ -68,13 +130,13 @@ pub fn render_text(rows: &[WorktreeRow], use_color: bool, out: &mut impl Write) 
             let _ = writeln!(
                 out,
                 "{}  \x1b[33m{}\x1b[0m  {}{}",
-                row.head, row.branch, row.path, dirty_marker
+                row.head, row.branch, row.path_str, dirty_marker
             );
         } else {
             let _ = writeln!(
                 out,
                 "{}  {}  {}{}",
-                row.head, row.branch, row.path, dirty_marker
+                row.head, row.branch, row.path_str, dirty_marker
             );
         }
     }
@@ -98,13 +160,13 @@ mod tests {
         vec![
             WorktreeRow {
                 branch: "main".into(),
-                path: "/home/user/project/main".into(),
+                path_str: "/home/user/project/main".into(),
                 head: "abc1234".into(),
                 dirty: false,
             },
             WorktreeRow {
                 branch: "feature/x".into(),
-                path: "/home/user/project/feature/x".into(),
+                path_str: "/home/user/project/feature/x".into(),
                 head: "def5678".into(),
                 dirty: true,
             },
@@ -142,9 +204,11 @@ mod tests {
             bare: false,
             locked: false,
         };
-        let row = WorktreeRow::from_entry(&entry, false);
+        let row =
+            WorktreeRow::from_entry(&entry, false, PathPolicy::Absolute, Path::new("/tmp"), None);
         assert_eq!(row.branch, "main");
         assert_eq!(row.head, "abcdef1");
+        assert_eq!(row.path_str, "/tmp/main");
         assert!(!row.dirty);
     }
 
@@ -157,7 +221,8 @@ mod tests {
             bare: false,
             locked: false,
         };
-        let row = WorktreeRow::from_entry(&entry, true);
+        let row =
+            WorktreeRow::from_entry(&entry, true, PathPolicy::Absolute, Path::new("/tmp"), None);
         assert_eq!(row.branch, "(detached)");
         assert!(row.dirty);
     }
@@ -168,5 +233,82 @@ mod tests {
         assert!(!ColorPolicy::Never.should_color(true));
         assert!(ColorPolicy::Auto.should_color(true));
         assert!(!ColorPolicy::Auto.should_color(false));
+    }
+
+    #[test]
+    fn path_policy_relative_subdir() {
+        let p = PathPolicy::Relative.format(
+            Path::new("/home/user/project/main"),
+            Path::new("/home/user/project"),
+            None,
+        );
+        assert_eq!(p, "main");
+    }
+
+    #[test]
+    fn path_policy_relative_cwd_itself() {
+        let p = PathPolicy::Relative.format(
+            Path::new("/home/user/project"),
+            Path::new("/home/user/project"),
+            None,
+        );
+        assert_eq!(p, ".");
+    }
+
+    #[test]
+    fn path_policy_relative_sibling() {
+        let p = PathPolicy::Relative.format(
+            Path::new("/home/user/project/main"),
+            Path::new("/home/user/project/feature"),
+            None,
+        );
+        assert_eq!(p, "../main");
+    }
+
+    #[test]
+    fn path_policy_absolute() {
+        let p = PathPolicy::Absolute.format(
+            Path::new("/home/user/project/main"),
+            Path::new("/tmp"),
+            None,
+        );
+        assert_eq!(p, "/home/user/project/main");
+    }
+
+    #[test]
+    fn path_policy_abbreviated_under_home() {
+        let p = PathPolicy::Abbreviated.format(
+            Path::new("/home/user/project/main"),
+            Path::new("/tmp"),
+            Some(Path::new("/home/user")),
+        );
+        assert_eq!(p, "~/project/main");
+    }
+
+    #[test]
+    fn path_policy_abbreviated_home_itself() {
+        let p = PathPolicy::Abbreviated.format(
+            Path::new("/home/user"),
+            Path::new("/tmp"),
+            Some(Path::new("/home/user")),
+        );
+        assert_eq!(p, "~");
+    }
+
+    #[test]
+    fn path_policy_abbreviated_outside_home() {
+        let p = PathPolicy::Abbreviated.format(
+            Path::new("/opt/project/main"),
+            Path::new("/tmp"),
+            Some(Path::new("/home/user")),
+        );
+        assert_eq!(p, "/opt/project/main");
+    }
+
+    #[test]
+    fn path_policy_abbreviated_no_home() {
+        let p =
+            PathPolicy::Abbreviated.format(Path::new("/opt/project/main"), Path::new("/tmp"), None);
+        assert_eq!(p, "/opt/project/main");
     }
 }

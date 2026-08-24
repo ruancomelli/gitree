@@ -118,6 +118,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 worktree::ListOptions {
                     json: args.json,
                     color: args.color,
+                    path: args.path,
                 },
             )?;
         }

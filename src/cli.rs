@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 use clap_complete::Shell;
 
-use crate::format::ColorPolicy;
+use crate::format::{ColorPolicy, PathPolicy};
 
 /// gitree — native git worktree workflow tool
 ///
@@ -197,6 +197,11 @@ pub struct ListArgs {
     /// Color output: always, never, or auto.
     #[arg(long, value_enum, default_value = "auto")]
     pub color: ColorPolicy,
+
+    /// How to display worktree paths: relative (to CWD), absolute, or
+    /// abbreviated (home directory shown as `~`).
+    #[arg(long, value_enum, default_value = "relative")]
+    pub path: PathPolicy,
 }
 
 /// Arguments for `gitree switch`.

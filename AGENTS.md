@@ -84,7 +84,7 @@ src/
 ├── git.rs             # Typed Git wrapper: all `git` invocations go through here
 ├── repo.rs            # Wrapper discovery + methods (find wrapper root from CWD)
 ├── init.rs            # `gitree init` — bare clone setup
-├── migrate.rs         # `gitree migrate` — pre-flight checks + atomic rename
+├── migrate.rs         # `gitree migrate` — pre-flight checks + atomic rename + linked-worktree relocation
 ├── worktree.rs        # `gitree add/remove/list/prune/where`
 ├── switch.rs          # `gitree switch/root` — prints cd command with shell escaping
 ├── foreach.rs         # `gitree foreach` — run command in all worktrees

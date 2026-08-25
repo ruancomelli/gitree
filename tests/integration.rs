@@ -75,6 +75,41 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+/// Creates a regular (non-bare) clone suitable as a `gitree migrate` target.
+///
+/// Returns the temp dir (keeps it alive) and the clone directory path. The
+/// clone has one commit on `main`; the source also has a `feature` branch so
+/// that worktrees created from the clone aren't flagged as local-only.
+fn create_regular_clone() -> (TempDir, std::path::PathBuf) {
+    let tmp = TempDir::new().unwrap();
+
+    // Source repo to clone from.
+    let src = tmp.path().join("source.git");
+    fs::create_dir(&src).unwrap();
+    git(&src, &["init", "--initial-branch=main"]);
+    git(&src, &["config", "user.email", "test@test.com"]);
+    git(&src, &["config", "user.name", "Test"]);
+    git(&src, &["config", "commit.gpgsign", "false"]);
+    fs::write(src.join("README.md"), "# Test\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "-m", "initial"]);
+
+    // Add a feature branch in the source so it exists on the remote.
+    git(&src, &["branch", "feature"]);
+
+    // Clone into a regular clone (the migration target).
+    let clone_dir = tmp.path().join("myclone");
+    git(
+        tmp.path(),
+        &["clone", src.to_str().unwrap(), clone_dir.to_str().unwrap()],
+    );
+    git(&clone_dir, &["config", "user.email", "test@test.com"]);
+    git(&clone_dir, &["config", "user.name", "Test"]);
+    git(&clone_dir, &["config", "commit.gpgsign", "false"]);
+
+    (tmp, clone_dir)
+}
+
 #[test]
 fn init_creates_wrapper_structure() {
     let _ = create_gitree_repo();
@@ -638,6 +673,204 @@ fn clean_runs_successfully() {
         .unwrap()
         .current_dir(&wrapper)
         .args(["clean"])
+        .assert()
+        .success();
+}
+
+// ---------------------------------------------------------------------------
+// `gitree migrate`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn migrate_plain_clone_creates_wrapper() {
+    let (_tmp, clone) = create_regular_clone();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&clone)
+        .args(["migrate", "--yes"])
+        .assert()
+        .success();
+
+    // Wrapper layout.
+    assert!(clone.join(".bare").is_dir());
+    assert!(clone.join(".git").is_file());
+    assert!(clone.join(".shared").is_dir());
+    // The .git file points at .bare (relative or absolute after repair).
+    let git_content = fs::read_to_string(clone.join(".git")).unwrap();
+    assert!(
+        git_content.contains("gitdir:") && git_content.contains(".bare"),
+        "expected .git file to point at .bare, got: {git_content}"
+    );
+
+    // The .gitignore at the wrapper level has .shared/.
+    let gitignore = fs::read_to_string(clone.join(".gitignore")).unwrap();
+    assert!(gitignore.contains(".shared/"));
+
+    // Main worktree relocated into <wrapper>/main/.
+    assert!(clone.join("main").is_dir());
+    assert!(clone.join("main").join("README.md").exists());
+
+    // .bare is bare.
+    let is_bare = git(&clone, &["rev-parse", "--is-bare-repository"]);
+    assert_eq!(is_bare, "true");
+
+    // gitree doctor passes and list shows main.
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&clone)
+        .args(["doctor"])
+        .assert()
+        .success();
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&clone)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("main"));
+}
+
+#[test]
+fn migrate_relocates_linked_worktree_sibling() {
+    let (tmp, clone) = create_regular_clone();
+
+    // Create a branch and a sibling linked worktree (outside the clone).
+    git(&clone, &["branch", "feature"]);
+    let sibling = tmp.path().join("sibling-feature");
+    git(
+        &clone,
+        &["worktree", "add", sibling.to_str().unwrap(), "feature"],
+    );
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&clone)
+        .args(["migrate", "--yes"])
+        .assert()
+        .success();
+
+    // The linked worktree is relocated into <wrapper>/feature/.
+    assert!(clone.join("feature").is_dir());
+    assert!(clone.join("feature").join("README.md").exists());
+
+    // The sibling path is gone.
+    assert!(!sibling.exists());
+
+    // Main worktree relocated.
+    assert!(clone.join("main").is_dir());
+
+    // git worktree list shows both worktrees at the wrapper.
+    let list = git(&clone, &["worktree", "list", "--porcelain"]);
+    assert!(
+        list.contains(clone.join("main").to_str().unwrap()),
+        "expected main worktree path in: {list}"
+    );
+    assert!(
+        list.contains(clone.join("feature").to_str().unwrap()),
+        "expected feature worktree path in: {list}"
+    );
+}
+
+#[test]
+fn migrate_locked_worktree_fails() {
+    let (tmp, clone) = create_regular_clone();
+    git(&clone, &["branch", "feature"]);
+    let sibling = tmp.path().join("locked-feature");
+    git(
+        &clone,
+        &["worktree", "add", sibling.to_str().unwrap(), "feature"],
+    );
+    git(&clone, &["worktree", "lock", sibling.to_str().unwrap()]);
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&clone)
+        .args(["migrate", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("locked"));
+
+    // The repository is untouched: .git is still a directory.
+    assert!(clone.join(".git").is_dir());
+    assert!(!clone.join(".bare").exists());
+}
+
+#[test]
+fn migrate_renames_dir_to_match_branch() {
+    let (tmp, clone) = create_regular_clone();
+    git(&clone, &["branch", "feature"]);
+    // Worktree at a directory whose name differs from its branch.
+    let sibling = tmp.path().join("custom-dir-name");
+    git(
+        &clone,
+        &["worktree", "add", sibling.to_str().unwrap(), "feature"],
+    );
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&clone)
+        .args(["migrate", "--yes"])
+        .assert()
+        .success();
+
+    // Relocated to <wrapper>/feature/, not <wrapper>/custom-dir-name/.
+    assert!(clone.join("feature").is_dir());
+    assert!(clone.join("feature").join("README.md").exists());
+    assert!(!clone.join("custom-dir-name").exists());
+}
+
+#[test]
+fn migrate_main_branch_with_slash() {
+    let (tmp, clone) = create_regular_clone();
+    git(&clone, &["branch", "feature/backport"]);
+
+    // Check out the slash-containing branch in the main worktree.
+    git(&clone, &["checkout", "feature/backport"]);
+    fs::write(clone.join("work.txt"), "work\n").unwrap();
+    git(&clone, &["add", "."]);
+    git(&clone, &["commit", "-m", "work on backport"]);
+
+    // Add a linked worktree for a second branch.
+    git(&clone, &["branch", "other"]);
+    let sibling = tmp.path().join("sibling-other");
+    git(
+        &clone,
+        &["worktree", "add", sibling.to_str().unwrap(), "other"],
+    );
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&clone)
+        .args(["migrate", "--yes", "--force"])
+        .assert()
+        .success();
+
+    // Main worktree relocated to <wrapper>/feature/backport/.
+    assert!(clone.join("feature").join("backport").is_dir());
+    assert!(
+        clone
+            .join("feature")
+            .join("backport")
+            .join("work.txt")
+            .exists()
+    );
+
+    // The state dir uses the basename (backport), not the full branch, so
+    // commondir `../..` resolves correctly to .bare/.
+    let state_dir = clone.join(".bare").join("worktrees").join("backport");
+    assert!(state_dir.is_dir());
+    let commondir = fs::read_to_string(state_dir.join("commondir")).unwrap();
+    assert_eq!(commondir.trim(), "../..");
+
+    // Linked worktree also relocated.
+    assert!(clone.join("other").is_dir());
+
+    // gitree doctor passes (verifies the full layout is sound).
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&clone)
+        .args(["doctor"])
         .assert()
         .success();
 }

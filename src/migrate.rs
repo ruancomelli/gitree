@@ -1,11 +1,22 @@
 //! `gitree migrate` — convert a regular clone into a worktree-based layout.
+//!
+//! Migrating a regular clone (`.git/` is a directory) into the gitree wrapper
+//! layout (`.bare/` + `.git` file + `.shared/` + `<branch>/` worktrees).
+//!
+//! In addition to the bare-rename that the original `migrate` performed, this
+//! version also relocates any existing linked worktrees into the wrapper at
+//! `<wrapper>/<branch>/` and converts the main worktree into a linked
+//! worktree, matching the layout produced by `gitree init` + `gitree add`.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::{GitreeError, Result};
-use crate::git::Git;
+use crate::git::{Git, WorktreeEntry};
 use crate::init;
+use crate::shared;
+use crate::types::SharedDir;
 
 /// Options for `gitree migrate`.
 #[derive(Debug, Clone)]
@@ -21,8 +32,8 @@ pub struct MigrateOptions {
 ///
 /// # Errors
 ///
-/// Returns an error if any pre-flight check fails, or if the atomic rename or
-/// verification fails.
+/// Returns an error if any pre-flight check fails, or if the relocation,
+/// rename, or verification fails.
 pub fn run(opts: MigrateOptions) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let git = Git::new(&cwd);
@@ -47,13 +58,16 @@ pub fn run(opts: MigrateOptions) -> Result<()> {
     eprintln!();
     eprintln!("Migrating …");
 
-    execute(&cwd, &report)?;
+    execute(&git, &cwd, &report)?;
 
     eprintln!();
     eprintln!("Migration complete.");
     eprintln!();
     eprintln!("Next steps:");
-    eprintln!("  gitree add main");
+    eprintln!("  cd {}", report.main_branch);
+    for branch in linked_branches(&report) {
+        eprintln!("  cd {branch}");
+    }
     eprintln!();
 
     Ok(())
@@ -62,8 +76,15 @@ pub fn run(opts: MigrateOptions) -> Result<()> {
 /// Pre-flight check report.
 #[derive(Debug)]
 struct PreflightReport {
-    /// Path to the `.git` directory.
+    /// Path to the original `.git` directory.
     git_dir: PathBuf,
+    /// Branch checked out in the main worktree.
+    main_branch: String,
+    /// Filesystem path of the main worktree (usually `cwd`, or a subdir if
+    /// `core.worktree` was set).
+    main_wt_path: PathBuf,
+    /// Linked worktrees (every non-bare worktree other than the main one).
+    linked_worktrees: Vec<WorktreeEntry>,
     /// Number of untracked files.
     untracked: usize,
     /// Whether the working tree is clean.
@@ -76,6 +97,25 @@ struct PreflightReport {
     git_size: u64,
 }
 
+/// Per-worktree transient files that belong to a single worktree (not shared
+/// across worktrees). These are moved from `.bare/` into the worktree's state
+/// directory during the main→linked conversion.
+const TRANSIENT_FILES: &[&str] = &[
+    "COMMIT_EDITMSG",
+    "FETCH_HEAD",
+    "ORIG_HEAD",
+    "REBASE_HEAD",
+    "MERGE_HEAD",
+    "MERGE_MSG",
+    "MERGE_MODE",
+    "REVERT_HEAD",
+    "CHERRY_PICK_HEAD",
+    "BISECT_LOG",
+    "BISECT_NAMES",
+    "BISECT_TERMS",
+    "AUTO_GC",
+];
+
 fn preflight(git: &Git, cwd: &Path, opts: &MigrateOptions) -> Result<PreflightReport> {
     // Check 1: must be a regular clone (.git is a directory).
     let git_dir_path = cwd.join(".git");
@@ -86,12 +126,37 @@ fn preflight(git: &Git, cwd: &Path, opts: &MigrateOptions) -> Result<PreflightRe
         )));
     }
 
-    // Check 2: no existing worktrees (regular clones shouldn't have any).
+    // Check 2: enumerate worktrees. Identify the main worktree (first non-bare
+    // entry) and any linked worktrees.
     let worktrees = git.worktree_list()?;
-    let non_main = worktrees.iter().filter(|wt| !wt.bare).count();
-    if non_main > 1 {
+    let non_bare: Vec<&WorktreeEntry> = worktrees.iter().filter(|wt| !wt.bare).collect();
+    if non_bare.is_empty() {
+        return Err(GitreeError::PreflightFailed(
+            "no worktrees found — this does not appear to be a regular clone".into(),
+        ));
+    }
+    let main_wt = non_bare[0];
+    let main_wt_path = main_wt.path.clone();
+    let main_branch = main_wt.branch.as_deref().ok_or_else(|| {
+        GitreeError::PreflightFailed(
+            "main worktree has a detached HEAD — cannot determine branch name \
+             for relocation. Check out a branch before migrating."
+                .into(),
+        )
+    })?;
+    let linked: Vec<WorktreeEntry> = non_bare[1..].iter().map(|e| (*e).clone()).collect();
+
+    // Check 2a: no locked worktrees — they cannot be safely relocated.
+    let locked: Vec<&WorktreeEntry> = non_bare.iter().copied().filter(|wt| wt.locked).collect();
+    if !locked.is_empty() {
+        let names: Vec<String> = locked
+            .iter()
+            .filter_map(|wt| wt.branch.as_deref().map(String::from))
+            .collect();
         return Err(GitreeError::PreflightFailed(format!(
-            "found {non_main} worktrees — run `git worktree remove` on all worktrees before migrating"
+            "locked worktrees cannot be migrated: {} — \
+             unlock with `git worktree unlock <path>` first",
+            names.join(", ")
         )));
     }
 
@@ -141,6 +206,9 @@ fn preflight(git: &Git, cwd: &Path, opts: &MigrateOptions) -> Result<PreflightRe
 
     Ok(PreflightReport {
         git_dir: git_dir_path,
+        main_branch: main_branch.to_string(),
+        main_wt_path,
+        linked_worktrees: linked,
         untracked,
         clean: dirty_count == 0,
         stash_count,
@@ -173,90 +241,401 @@ fn print_plan(report: &PreflightReport, cwd: &Path) {
         }
     }
     eprintln!();
+    eprintln!("  Worktree relocation:");
+    eprintln!(
+        "    {}: {} → {}/",
+        report.main_branch,
+        report.main_wt_path.display(),
+        cwd.join(&report.main_branch).display()
+    );
+    for wt in &report.linked_worktrees {
+        let branch = wt.branch.as_deref().unwrap_or("?");
+        let target = cwd.join(branch);
+        if wt.path == target {
+            eprintln!("    {branch}: {} (already in place)", wt.path.display());
+        } else {
+            eprintln!("    {branch}: {} → {}", wt.path.display(), target.display());
+        }
+    }
+    eprintln!();
     eprintln!("  Steps:");
-    eprintln!("    1. Rename .git → .bare");
-    eprintln!("    2. Write .git file (gitdir: ./.bare)");
-    eprintln!("    3. Create .shared/ directory");
-    eprintln!("    4. Ensure .gitignore has .shared/");
-    eprintln!("    5. Update remote.origin.fetch config");
-    eprintln!("    6. Fetch origin");
+    eprintln!("    1. Relocate linked worktrees into {}/", cwd.display());
+    eprintln!("    2. Rename .git → .bare");
+    eprintln!("    3. Write .git file (gitdir: ./.bare)");
+    eprintln!("    4. Create .shared/ directory");
+    eprintln!(
+        "    5. Move working files into {}/",
+        cwd.join(&report.main_branch).display()
+    );
+    eprintln!("    6. Convert main worktree into a linked worktree");
+    eprintln!("    7. Ensure .gitignore has .shared/");
+    eprintln!("    8. Update remote.origin.fetch config");
+    eprintln!("    9. Fetch origin");
+    eprintln!("    10. Repair worktree pointers");
 }
 
-fn execute(cwd: &Path, report: &PreflightReport) -> Result<()> {
+fn execute(git: &Git, cwd: &Path, report: &PreflightReport) -> Result<()> {
     let bare_path = cwd.join(".bare");
 
-    // Verify .bare doesn't already exist.
     if bare_path.exists() {
         return Err(GitreeError::PathExists(bare_path));
     }
 
-    // Step 1: rename .git → .bare (atomic on same filesystem).
-    fs::rename(&report.git_dir, &bare_path).map_err(|e| {
-        GitreeError::PreflightFailed(format!(
-            "failed to rename .git → .bare: {e}\nYour original clone is untouched."
-        ))
-    })?;
+    // Phase 1: relocate linked worktrees into cwd/<branch>/ (before the
+    // rename, while `git worktree move` still operates on the live .git).
+    relocate_linked_worktrees(git, cwd, report)?;
 
-    // Step 2: write .git file.
-    let git_file = cwd.join(".git");
-    if let Err(e) = fs::write(&git_file, "gitdir: ./.bare\n") {
-        // Recovery: rename .bare back to .git.
-        let _ = fs::rename(&bare_path, &report.git_dir);
-        return Err(GitreeError::PreflightFailed(format!(
-            "failed to write .git file: {e}\nRecovery: renamed .bare → .git"
-        )));
-    }
+    // Phase 2: rename .git → .bare (atomic on the same filesystem).
+    rename_git_to_bare(&report.git_dir, &bare_path)?;
 
-    // Step 3: create .shared/.
-    let shared_path = cwd.join(".shared");
-    if let Err(e) = fs::create_dir_all(&shared_path) {
-        let _ = fs::remove_file(&git_file);
-        let _ = fs::rename(&bare_path, &report.git_dir);
-        return Err(GitreeError::PreflightFailed(format!(
-            "failed to create .shared/: {e}\nRecovery: removed .git file, renamed .bare → .git"
-        )));
-    }
+    // Phase 3: write the .git file and create .shared/.
+    write_git_file_and_shared(cwd, &bare_path)?;
 
-    // Step 4: ensure .shared/ is gitignored.
+    // Phase 4: convert the main worktree into a linked worktree at
+    // cwd/<main_branch>/, moving working files and per-worktree state.
+    let linked: Vec<&str> = linked_branches(report);
+    convert_main_worktree(cwd, &bare_path, &report.main_branch, &linked)?;
+
+    // Phase 5: ensure the wrapper-level .gitignore has .shared/.
     let gitignore = cwd.join(".gitignore");
     if let Err(e) = init::ensure_gitignore_entry(&gitignore, ".shared/") {
         eprintln!("warning: could not update .gitignore: {e}");
     }
 
-    // Step 5: configure remote fetch refs.
-    let git = Git::new(&bare_path);
-    if let Err(e) = git.config_set("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*") {
+    // Phase 6: configure the bare repo. A renamed regular clone has
+    // `core.bare = false` (and possibly `core.worktree`); flip it to bare so
+    // `.bare` behaves like a bare-clone's database, then configure the remote
+    // fetch refs and fetch (non-fatal if offline).
+    let bare_git = Git::new(&bare_path);
+    if let Err(e) = bare_git.config_set("core.bare", "true") {
+        eprintln!("warning: could not set core.bare: {e}");
+    }
+    if let Err(e) = bare_git.config_unset("core.worktree") {
+        eprintln!("warning: could not unset core.worktree: {e}");
+    }
+    if let Err(e) =
+        bare_git.config_set("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+    {
         eprintln!("warning: could not set remote.origin.fetch: {e}");
     }
-
-    // Step 6: fetch (non-fatal if offline).
     eprintln!("Fetching …");
-    if let Err(e) = git.fetch() {
+    if let Err(e) = bare_git.fetch() {
         eprintln!("warning: fetch failed (continuing): {e}");
     }
 
-    // Verify.
-    let verify_git = Git::new(cwd);
-    match verify_git.git_dir() {
-        Ok(path) if path.ends_with(".bare") => {
-            eprintln!("Verification: OK (git dir = {})", path.display());
+    // Phase 7: repair worktree pointers (fixes linked worktrees' .git files
+    // which still reference the pre-rename .git path).
+    let cwd_git = Git::new(cwd);
+    if let Err(e) = cwd_git.worktree_repair() {
+        eprintln!("warning: git worktree repair failed: {e}");
+    }
+
+    // Phase 8: link .shared/ items into each worktree.
+    link_shared_into_worktrees(cwd, report)?;
+
+    // Phase 9: verify the resulting layout.
+    verify(cwd, report)?;
+
+    Ok(())
+}
+
+/// Phase 1: moves each linked worktree into `cwd/<branch>/` via
+/// `git worktree move`. Worktrees already at the target are skipped.
+fn relocate_linked_worktrees(git: &Git, cwd: &Path, report: &PreflightReport) -> Result<()> {
+    for wt in &report.linked_worktrees {
+        let branch = wt.branch.as_deref().ok_or_else(|| {
+            GitreeError::PreflightFailed(
+                "a linked worktree has a detached HEAD — cannot determine \
+                 branch name for relocation"
+                    .into(),
+            )
+        })?;
+        let target = cwd.join(branch);
+        if wt.path == target {
+            continue;
         }
-        Ok(path) => {
+        if target.exists() {
             return Err(GitreeError::PreflightFailed(format!(
-                "verification failed: git dir is {}, expected .bare\n\
-                 Recovery: run `mv .bare .git && rm .git`",
-                path.display()
+                "target path {} already exists — cannot relocate worktree '{branch}' \
+                 (move or remove it first)",
+                target.display()
             )));
         }
-        Err(e) => {
+        eprintln!(
+            "Moving worktree '{branch}' {} → {} …",
+            wt.path.display(),
+            target.display()
+        );
+        git.worktree_move(&wt.path, &target)?;
+    }
+    Ok(())
+}
+
+/// Phase 2: renames `.git` → `.bare`, rolling back on failure.
+fn rename_git_to_bare(git_dir: &Path, bare_path: &Path) -> Result<()> {
+    fs::rename(git_dir, bare_path).map_err(|e| {
+        GitreeError::PreflightFailed(format!(
+            "failed to rename .git → .bare: {e}\nYour original clone is untouched."
+        ))
+    })
+}
+
+/// Phase 3: writes the `.git` file and creates `.shared/`, with rollback.
+fn write_git_file_and_shared(cwd: &Path, bare_path: &Path) -> Result<()> {
+    let git_file = cwd.join(".git");
+    if let Err(e) = fs::write(&git_file, "gitdir: ./.bare\n") {
+        let _ = fs::rename(bare_path, git_file);
+        return Err(GitreeError::PreflightFailed(format!(
+            "failed to write .git file: {e}\nRecovery: renamed .bare → .git"
+        )));
+    }
+
+    let shared_path = cwd.join(".shared");
+    if let Err(e) = fs::create_dir_all(&shared_path) {
+        let _ = fs::remove_file(&git_file);
+        let _ = fs::rename(bare_path, git_file);
+        return Err(GitreeError::PreflightFailed(format!(
+            "failed to create .shared/: {e}\nRecovery: removed .git file, renamed .bare → .git"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Phase 4: converts the main worktree into a linked worktree at
+/// `cwd/<main_branch>/`.
+///
+/// This moves every top-level entry of `cwd` (except reserved names and the
+/// linked worktree directories) into `cwd/<main_branch>/`, then moves the
+/// per-worktree state (`index`, `logs/`, transient files) from `.bare/` into
+/// `.bare/worktrees/<main_branch>/`, and writes the `commondir`/`gitdir`/`.git`
+/// files that wire the worktree to the bare repo.
+fn convert_main_worktree(
+    cwd: &Path,
+    bare: &Path,
+    main_branch: &str,
+    linked_branches: &[&str],
+) -> Result<()> {
+    let main_dir = cwd.join(main_branch);
+
+    // Create the worktree directory.
+    fs::create_dir_all(&main_dir).map_err(|e| {
+        GitreeError::PreflightFailed(format!("failed to create {}: {e}", main_dir.display()))
+    })?;
+
+    // Compute the set of top-level entries to leave in place: the git
+    // database, the wrapper-level git/shared dirs, and the directories that
+    // hold each worktree (main + linked).
+    let skip = skip_top_level_dirs(cwd, main_branch, linked_branches);
+
+    // Move every other top-level entry into the worktree directory.
+    for entry in fs::read_dir(cwd)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if skip.contains(name_str.as_ref()) {
+            continue;
+        }
+        let dest = main_dir.join(&name);
+        fs::rename(entry.path(), &dest).map_err(|e| {
+            GitreeError::PreflightFailed(format!(
+                "failed to move {} → {}: {e}\n\
+                 Recovery: move files back into {parent} and run \
+                 `mv .bare .git && rm .git`",
+                entry.path().display(),
+                dest.display(),
+                parent = cwd.display()
+            ))
+        })?;
+    }
+
+    // Create the worktree state directory under .bare/worktrees/<basename>.
+    //
+    // Git names the per-worktree admin directory after the *basename* of the
+    // worktree path (not the branch name), so a branch like
+    // `feature/backport-adjacency-check` uses the state dir
+    // `.bare/worktrees/backport-adjacency-check` — one level deep, matching
+    // the `commondir: ../..` that points back at `.bare`.
+    let state_name = main_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| main_branch.replace('/', "-"));
+    let wt_state = bare.join("worktrees").join(&state_name);
+    if wt_state.exists() {
+        return Err(GitreeError::PreflightFailed(format!(
+            "worktree state directory {} already exists — \
+             the branch basename '{state_name}' collides with an existing \
+             worktree. Rename the branch or remove the conflicting worktree.",
+            wt_state.display()
+        )));
+    }
+    fs::create_dir_all(&wt_state)?;
+    fs::create_dir_all(wt_state.join("refs"))?;
+
+    // HEAD: copy (keep .bare/HEAD as the bare repo's default-branch HEAD).
+    let bare_head = bare.join("HEAD");
+    if bare_head.exists() {
+        fs::copy(&bare_head, wt_state.join("HEAD"))?;
+    }
+
+    // index: move (per-worktree staging area).
+    let bare_index = bare.join("index");
+    if bare_index.exists() {
+        fs::rename(&bare_index, wt_state.join("index"))?;
+    }
+
+    // logs/: move the contents into the worktree's logs/ (only logs/HEAD is
+    // truly per-worktree, but moving the whole tree preserves all reflogs).
+    let bare_logs = bare.join("logs");
+    let wt_logs = wt_state.join("logs");
+    if bare_logs.exists() {
+        fs::create_dir_all(&wt_logs)?;
+        move_dir_contents(&bare_logs, &wt_logs)?;
+        let _ = fs::remove_dir_all(&bare_logs);
+    }
+
+    // Transient per-worktree files.
+    for transient in TRANSIENT_FILES {
+        let src = bare.join(transient);
+        if src.exists() {
+            let _ = fs::rename(&src, wt_state.join(transient));
+        }
+    }
+
+    // Write the administrative files: commondir, gitdir, and the worktree's
+    // .git file. Paths are absolute (matching git's own worktree format).
+    fs::write(wt_state.join("commondir"), "../..\n")?;
+
+    let main_abs = main_dir
+        .canonicalize()
+        .unwrap_or_else(|_| main_dir.to_path_buf());
+    fs::write(
+        wt_state.join("gitdir"),
+        format!("{}\n", main_abs.join(".git").display()),
+    )?;
+
+    let bare_abs = bare.canonicalize().unwrap_or_else(|_| bare.to_path_buf());
+    fs::write(
+        main_dir.join(".git"),
+        format!(
+            "gitdir: {}\n",
+            bare_abs.join("worktrees").join(&state_name).display()
+        ),
+    )?;
+
+    Ok(())
+}
+
+/// Returns the set of top-level directory names that must stay in place during
+/// the main-worktree conversion: `.git`, `.bare`, `.shared`, and the directory
+/// holding each worktree (main + linked).
+fn skip_top_level_dirs(cwd: &Path, main_branch: &str, linked_branches: &[&str]) -> HashSet<String> {
+    let mut skip = HashSet::new();
+    for name in [".git", ".bare", ".shared"] {
+        skip.insert(name.to_string());
+    }
+    for branch in std::iter::once(main_branch).chain(linked_branches.iter().copied()) {
+        let path = cwd.join(branch);
+        if let Ok(rel) = path.strip_prefix(cwd)
+            && let Some(top) = rel.iter().next()
+        {
+            skip.insert(top.to_string_lossy().into_owned());
+        }
+    }
+    skip
+}
+
+/// Moves every entry of `src` into `dest` (which must exist and be writable).
+fn move_dir_contents(src: &Path, dest: &Path) -> Result<()> {
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let target = dest.join(entry.file_name());
+        fs::rename(entry.path(), &target).map_err(|e| {
+            GitreeError::PreflightFailed(format!(
+                "failed to move {} → {}: {e}",
+                entry.path().display(),
+                target.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+/// Phase 8: links `.shared/` items into each worktree directory.
+fn link_shared_into_worktrees(cwd: &Path, report: &PreflightReport) -> Result<()> {
+    let shared = SharedDir::from_path(cwd.join(".shared"));
+    if !shared.as_path().is_dir() {
+        return Ok(());
+    }
+    for wt_path in worktree_target_paths(cwd, report) {
+        let results = shared::link_shared(&shared, &wt_path)?;
+        for result in results {
+            match result {
+                shared::LinkResult::Linked(name) => {
+                    eprintln!("  {}: linked {name}", wt_path.display());
+                }
+                shared::LinkResult::Skipped(name) => {
+                    eprintln!("  {}: skipped {name} (exists)", wt_path.display());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Returns the target paths of every worktree after migration (main + linked).
+fn worktree_target_paths(cwd: &Path, report: &PreflightReport) -> Vec<PathBuf> {
+    let mut paths = vec![cwd.join(&report.main_branch)];
+    for branch in linked_branches(report) {
+        paths.push(cwd.join(branch));
+    }
+    paths
+}
+
+/// Phase 9: verifies that every non-bare worktree ended up at `cwd/<branch>`.
+fn verify(cwd: &Path, report: &PreflightReport) -> Result<()> {
+    let git = Git::new(cwd);
+    let worktrees = git.worktree_list()?;
+    let cwd_abs = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+
+    let mut non_bare = 0;
+    for wt in &worktrees {
+        if wt.bare {
+            continue;
+        }
+        non_bare += 1;
+        let branch = wt.branch.as_deref().unwrap_or("?");
+        let expected = cwd_abs.join(branch);
+        let actual = wt.path.canonicalize().unwrap_or_else(|_| wt.path.clone());
+        if actual != expected {
             return Err(GitreeError::PreflightFailed(format!(
-                "verification failed: {e}\n\
-                 Recovery: run `mv .bare .git && rm .git`"
+                "verification failed: worktree '{branch}' is at {} but expected {}.\n\
+                 Recovery: inspect `git worktree list` and run `git worktree repair`",
+                wt.path.display(),
+                expected.display()
             )));
         }
     }
 
+    let expected_count = 1 + report.linked_worktrees.len();
+    if non_bare != expected_count {
+        return Err(GitreeError::PreflightFailed(format!(
+            "verification failed: found {non_bare} worktree(s) but expected {expected_count}.\n\
+             Recovery: inspect `git worktree list` and run `git worktree repair`"
+        )));
+    }
+
+    eprintln!("Verification: OK ({non_bare} worktree(s))");
     Ok(())
+}
+
+/// Returns the branch names of all linked worktrees.
+fn linked_branches(report: &PreflightReport) -> Vec<&str> {
+    report
+        .linked_worktrees
+        .iter()
+        .filter_map(|wt| wt.branch.as_deref())
+        .collect()
 }
 
 /// Recursively computes the size of a directory in bytes.
@@ -340,5 +719,42 @@ mod tests {
         }
         // Should not hang.
         let _ = dir_size(tmp.path());
+    }
+
+    #[test]
+    fn skip_top_level_dirs_includes_reserved_and_worktree_dirs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cwd = tmp.path();
+        fs::create_dir_all(cwd.join(".bare")).unwrap();
+        fs::create_dir_all(cwd.join(".shared")).unwrap();
+        fs::create_dir_all(cwd.join("main")).unwrap();
+        fs::create_dir_all(cwd.join("feature")).unwrap();
+
+        let skip = skip_top_level_dirs(cwd, "main", &["feature/test", "add-version-command"]);
+        assert!(skip.contains(".git"));
+        assert!(skip.contains(".bare"));
+        assert!(skip.contains(".shared"));
+        assert!(skip.contains("main"));
+        assert!(skip.contains("feature"));
+        assert!(skip.contains("add-version-command"));
+        assert!(!skip.contains("src"));
+    }
+
+    #[test]
+    fn move_dir_contents_moves_all_entries() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dest = tmp.path().join("dest");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(src.join("a"), "1").unwrap();
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("sub").join("b"), "2").unwrap();
+
+        move_dir_contents(&src, &dest).unwrap();
+
+        assert!(dest.join("a").exists());
+        assert!(dest.join("sub").join("b").exists());
+        assert!(!src.join("a").exists());
     }
 }

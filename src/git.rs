@@ -109,6 +109,7 @@ impl Git {
     ///
     /// Returns an error if git is unavailable or the path is not inside a
     /// repository.
+    #[allow(dead_code)]
     pub fn git_dir(&self) -> Result<PathBuf> {
         let out = self.run(&["rev-parse", "--git-dir"])?;
         Ok(PathBuf::from(out))
@@ -290,6 +291,42 @@ impl Git {
         Ok(())
     }
 
+    /// Unsets a git config key. No-op if the key is not set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git fails for a reason other than the key being
+    /// unset.
+    pub fn config_unset(&self, key: &str) -> Result<()> {
+        match self.config_get(key)? {
+            Some(_) => self.run(&["config", "--unset", key]).map(|_| ()),
+            None => Ok(()),
+        }
+    }
+
+    /// Runs `git worktree move <from> <to>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git fails.
+    pub fn worktree_move(&self, from: &Path, to: &Path) -> Result<()> {
+        let from_str = from.to_string_lossy();
+        let to_str = to.to_string_lossy();
+        self.run(&["worktree", "move", &from_str, &to_str])?;
+        Ok(())
+    }
+
+    /// Runs `git worktree repair`, fixing stale `gitdir`/`commondir` pointers
+    /// after the `.git` → `.bare` rename or a worktree relocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git fails.
+    pub fn worktree_repair(&self) -> Result<()> {
+        self.run(&["worktree", "repair"])?;
+        Ok(())
+    }
+
     /// Runs `git worktree prune`.
     ///
     /// # Errors
@@ -363,7 +400,6 @@ impl Git {
     ///
     /// Returns an error if git fails for a reason other than the key being
     /// unset.
-    #[allow(dead_code)]
     pub fn config_get(&self, key: &str) -> Result<Option<String>> {
         match self.run(&["config", "--get", key]) {
             Ok(val) => Ok(Some(val)),

@@ -119,8 +119,8 @@ cd main
 | `gitree root` | | Print the wrapper root directory |
 | `gitree pull` | `pl` | Fetch and fast-forward main |
 | `gitree foreach <cmd>` | `fe` | Run a command in every worktree |
-| `gitree status` | | Show status overview of all worktrees |
-| `gitree doctor` | | Health check for the wrapper |
+| `gitree status` | `st` | Show status overview of all worktrees |
+| `gitree doctor` | `doc` | Health check for the wrapper |
 | `gitree clean` | | Remove stale worktrees and branches |
 | `gitree env <shell> [--alias <name>]` | | Generate shell integration script |
 | `gitree completion <shell>` | | Generate shell completions |

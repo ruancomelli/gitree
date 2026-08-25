@@ -141,6 +141,25 @@ All subcommand definitions live in `src/cli.rs`. Use clap derive with:
 - `clap::ValueEnum` for enum-valued arguments (e.g. `--color`)
 - Doc comments become help text
 
+Canonical subcommand aliases (keep this list in sync with `Commands` in
+`src/cli.rs`):
+
+| Command | Alias |
+|---|---|
+| `add` | `a` |
+| `remove` | `rm` |
+| `list` | `ls` |
+| `switch` | `sw` |
+| `pull` | `pl` |
+| `foreach` | `fe` |
+| `status` | `st` |
+| `doctor` | `doc` |
+
+When adding or removing an alias, update this table, the `Commands` enum,
+and the README commands table together. Aliases are intentionally short
+(one to three characters) and must not collide with each other or with
+common git/gitree flags.
+
 ### Shell integration
 
 `src/env.rs` generates shell scripts for bash/zsh/fish/posix. The `gtr()`

@@ -91,9 +91,11 @@ pub enum Commands {
     Foreach(ForeachArgs),
 
     /// Show status overview of all worktrees.
+    #[command(alias = "st")]
     Status,
 
     /// Health check for the gitree wrapper.
+    #[command(alias = "doc")]
     Doctor,
 
     /// Remove stale worktrees and delete branches gone from remote.

@@ -179,10 +179,10 @@ fn preflight(git: &Git, cwd: &Path, opts: &MigrateOptions) -> Result<PreflightRe
     }
 
     // Check 5: fsck.
-    git.fsck().map_err(|_| {
-        GitreeError::PreflightFailed(
-            "git fsck failed — repository integrity is questionable".into(),
-        )
+    git.fsck().map_err(|e| {
+        GitreeError::PreflightFailed(format!(
+            "git fsck failed — repository integrity is questionable: {e}"
+        ))
     })?;
 
     // Check 6: local-only branches.

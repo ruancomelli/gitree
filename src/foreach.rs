@@ -61,7 +61,7 @@ pub fn run(wrapper: &Wrapper, opts: ForeachOptions) -> Result<()> {
 fn run_sequential(worktrees: &[&WorktreeEntry], command: &str) -> Result<()> {
     for wt in worktrees {
         let branch = wt.branch.as_deref().unwrap_or("(detached)");
-        eprintln!("=== {branch} ({}) ===", wt.path.display());
+        eprintln!("{}", format_header(branch, &wt.path.display().to_string()));
         let status = Command::new("sh")
             .arg("-c")
             .arg(command)
@@ -84,6 +84,11 @@ struct ThreadResult {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     error: Option<String>,
+}
+
+/// Formats the section header printed before each worktree run.
+fn format_header(branch: &str, path_display: &str) -> String {
+    format!("=== {branch} ({path_display}) ===")
 }
 
 fn run_parallel(worktrees: &[&WorktreeEntry], command: &str) -> Result<()> {
@@ -147,7 +152,7 @@ fn run_parallel(worktrees: &[&WorktreeEntry], command: &str) -> Result<()> {
 
     let mut had_error = false;
     for result in &results {
-        eprintln!("=== {} ({}) ===", result.branch, result.path_display);
+        eprintln!("{}", format_header(&result.branch, &result.path_display));
         if !result.stdout.is_empty() {
             let _ = std::io::stdout().write_all(&result.stdout);
         }

@@ -55,8 +55,9 @@ pub fn run_add(wrapper: &Wrapper, opts: AddOptions) -> Result<()> {
         }
     } else {
         // For existing branch: if only remote, create a tracking local.
-        let has_local = git.has_local_branch(branch_str)?;
-        let has_remote = git.has_remote_branch(branch_str)?;
+        let branches = git.branches()?;
+        let has_local = branches.local.iter().any(|b| b == branch_str);
+        let has_remote = branches.remote.iter().any(|b| b == branch_str);
         if !has_local && !has_remote {
             return Err(GitreeError::BranchNotFound(opts.branch));
         }

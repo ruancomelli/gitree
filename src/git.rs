@@ -4,6 +4,7 @@
 //! and returns parsed or trimmed data.  This avoids fragile git crate bindings
 //! and keeps gitree a thin ergonomic layer.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -205,23 +206,19 @@ impl Git {
             .collect())
     }
 
-    /// Returns `true` if a local branch with the given name exists.
+    /// Returns a snapshot of local and remote branch names.
+    ///
+    /// Use this when both sets are needed; it issues one `git branch`
+    /// invocation per set.
     ///
     /// # Errors
     ///
     /// Returns an error if git fails.
-    pub fn has_local_branch(&self, name: &str) -> Result<bool> {
-        Ok(self.local_branches()?.iter().any(|b| b == name))
-    }
-
-    /// Returns `true` if a remote branch with the given name exists on
-    /// `origin`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if git fails.
-    pub fn has_remote_branch(&self, name: &str) -> Result<bool> {
-        Ok(self.remote_branches()?.iter().any(|b| b == name))
+    pub fn branches(&self) -> Result<BranchSet> {
+        Ok(BranchSet {
+            local: self.local_branches()?,
+            remote: self.remote_branches()?,
+        })
     }
 
     /// Returns the list of local branches that have no corresponding remote
@@ -231,12 +228,12 @@ impl Git {
     ///
     /// Returns an error if git fails.
     pub fn local_only_branches(&self) -> Result<Vec<String>> {
-        let local = self.local_branches()?;
-        let remote = self.remote_branches()?;
-        Ok(local
-            .iter()
-            .filter(|b| !remote.iter().any(|r| r == *b))
-            .cloned()
+        let branches = self.branches()?;
+        let remote: HashSet<&str> = branches.remote.iter().map(String::as_str).collect();
+        Ok(branches
+            .local
+            .into_iter()
+            .filter(|b| !remote.contains(b.as_str()))
             .collect())
     }
 
@@ -516,6 +513,15 @@ impl Git {
 // ---------------------------------------------------------------------------
 // WorktreeEntry — parsed `git worktree list --porcelain`
 // ---------------------------------------------------------------------------
+
+/// A snapshot of local and remote branch names.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BranchSet {
+    /// Local branches (without the `refs/heads/` prefix).
+    pub local: Vec<String>,
+    /// Remote-tracking branches from `origin` (without the `origin/` prefix).
+    pub remote: Vec<String>,
+}
 
 /// A single entry from `git worktree list --porcelain`.
 #[derive(Debug, Clone, PartialEq, Eq)]

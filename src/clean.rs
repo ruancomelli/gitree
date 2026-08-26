@@ -1,5 +1,6 @@
 //! `gitree clean` — remove stale worktrees and delete branches gone from remote.
 
+use std::collections::HashSet;
 use std::io::Write;
 
 use crate::error::{GitreeError, Result};
@@ -39,22 +40,18 @@ pub fn run(wrapper: &Wrapper, opts: CleanOptions) -> Result<()> {
         )));
     }
 
-    // Find local branches whose remote is gone.
-    let local_branches = git.local_branches()?;
-    let remote_branches = git.remote_branches()?;
+    // Find local branches whose remote is gone and that have no active
+    // worktree.
     let worktrees = git.worktree_list()?;
-
-    let active_branches: std::collections::HashSet<&str> = worktrees
+    let active_branches: HashSet<&str> = worktrees
         .iter()
         .filter_map(|wt| wt.branch.as_deref())
         .collect();
 
-    let stale: Vec<&String> = local_branches
-        .iter()
-        .filter(|b| {
-            // Not on remote and doesn't have an active worktree.
-            !remote_branches.iter().any(|r| r == *b) && !active_branches.contains(b.as_str())
-        })
+    let stale: Vec<String> = git
+        .local_only_branches()?
+        .into_iter()
+        .filter(|b| !active_branches.contains(b.as_str()))
         .collect();
 
     if stale.is_empty() {

@@ -78,24 +78,23 @@ pub fn run_complete_branches(context: Option<&str>) -> Result<()> {
 
 /// Branches not currently checked out as a worktree (the `add` set).
 fn add_branches(git: &Git) -> Vec<String> {
-    let local = git.local_branches().unwrap_or_default();
-    let remote = git.remote_branches().unwrap_or_default();
+    let branches = git.branches().unwrap_or_default();
     let active: HashSet<String> = git
         .worktree_list()
         .unwrap_or_default()
         .into_iter()
         .filter_map(|wt| wt.branch)
         .collect();
-    let local_set: HashSet<&str> = local.iter().map(String::as_str).collect();
+    let local_set: HashSet<&str> = branches.local.iter().map(String::as_str).collect();
 
     let mut result = Vec::new();
-    for b in &local {
-        if !active.contains(b.as_str()) {
+    for b in &branches.local {
+        if !active.contains(b) {
             result.push(b.clone());
         }
     }
-    for b in &remote {
-        if !active.contains(b.as_str()) && !local_set.contains(b.as_str()) {
+    for b in &branches.remote {
+        if !active.contains(b) && !local_set.contains(b.as_str()) {
             result.push(b.clone());
         }
     }
@@ -114,11 +113,10 @@ fn worktree_branches(git: &Git) -> Vec<String> {
 
 /// All local + remote branches, deduplicated (the `base` set).
 fn all_branches(git: &Git) -> Vec<String> {
-    let local = git.local_branches().unwrap_or_default();
-    let remote = git.remote_branches().unwrap_or_default();
+    let branches = git.branches().unwrap_or_default();
     let mut seen: HashSet<&str> = HashSet::new();
     let mut result = Vec::new();
-    for b in local.iter().chain(remote.iter()) {
+    for b in branches.local.iter().chain(branches.remote.iter()) {
         if seen.insert(b.as_str()) {
             result.push(b.clone());
         }

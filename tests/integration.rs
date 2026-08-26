@@ -884,6 +884,48 @@ fn clean_runs_successfully() {
         .success();
 }
 
+#[test]
+fn clean_aborts_when_fetch_fails() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    // Create a local-only branch that clean would flag as stale.
+    let main_wt = wrapper.join("main");
+    fs::write(main_wt.join("file.txt"), "content\n").unwrap();
+    git(&main_wt, &["add", "."]);
+    git(&main_wt, &["commit", "-m", "work"]);
+    git(&main_wt, &["branch", "local-only"]);
+
+    // Break the remote so `git fetch --prune` fails.
+    git(
+        &wrapper.join(".bare"),
+        &["remote", "set-url", "origin", "/nonexistent/repo.git"],
+    );
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["clean", "--force"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "could not refresh remote-tracking refs",
+        ));
+
+    // The branch must survive: no deletion against stale remote state.
+    let branches = git(&wrapper.join(".bare"), &["branch", "--list"]);
+    assert!(
+        branches.contains("local-only"),
+        "local-only branch must survive an aborted clean"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // `gitree pull`
 // ---------------------------------------------------------------------------

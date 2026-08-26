@@ -2,7 +2,7 @@
 
 use std::io::Write;
 
-use crate::error::Result;
+use crate::error::{GitreeError, Result};
 use crate::repo::Wrapper;
 
 /// Options for `gitree clean`.
@@ -29,8 +29,15 @@ pub fn run(wrapper: &Wrapper, opts: CleanOptions) -> Result<()> {
     git.worktree_prune()?;
 
     eprintln!("Pruning remote-tracking refs …");
-    // Use fetch --prune to clean up remote refs.
-    let _ = git.run_fetch_prune();
+    // Stale-branch detection depends on fresh remote state: a failed fetch
+    // leaves the ref list outdated, and deleting against it could remove
+    // branches that still exist on the remote.
+    if let Err(e) = git.run_fetch_prune() {
+        return Err(GitreeError::Other(format!(
+            "could not refresh remote-tracking refs ({e}) — \
+             refusing to detect stale branches from outdated remote state"
+        )));
+    }
 
     // Find local branches whose remote is gone.
     let local_branches = git.local_branches()?;

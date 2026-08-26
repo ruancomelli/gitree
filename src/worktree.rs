@@ -1,6 +1,7 @@
 //! `gitree add`, `gitree remove`, `gitree list`, `gitree prune`, `gitree where`.
 
 use std::io::IsTerminal;
+use std::path::Path;
 
 use crate::error::{GitreeError, Result};
 use crate::format::{self, ColorPolicy, PathPolicy, WorktreeRow};
@@ -51,7 +52,11 @@ pub fn run_add(wrapper: &Wrapper, opts: AddOptions) -> Result<()> {
     let base_ref: Option<String> = if opts.new {
         match &opts.base {
             Some(b) => Some(b.clone()),
-            None => Some(determine_base_ref(&git, wrapper)?),
+            None => Some(determine_base_ref(
+                &git,
+                wrapper,
+                &std::env::current_dir()?,
+            )?),
         }
     } else {
         // For existing branch: if only remote, create a tracking local.
@@ -108,15 +113,16 @@ pub fn run_add(wrapper: &Wrapper, opts: AddOptions) -> Result<()> {
 /// DWIM logic:
 /// - If inside a worktree, use its HEAD.
 /// - If at the wrapper level, use `main` (or `master` if `main` doesn't exist).
-fn determine_base_ref(git: &Git, wrapper: &Wrapper) -> Result<String> {
-    let cwd = std::env::current_dir()?;
+fn determine_base_ref(git: &Git, wrapper: &Wrapper, cwd: &Path) -> Result<String> {
+    // Canonicalize so paths reached through symlinks still compare equal to
+    // the wrapper root.
+    let resolve = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
 
     // If CWD is inside a worktree (not the wrapper itself), use HEAD.
-    if cwd != *wrapper.path() {
-        let worktree_git = Git::new(&cwd);
-        if let Ok(head) = worktree_git.run_rev_parse_head() {
-            return Ok(head);
-        }
+    if resolve(cwd) != resolve(wrapper.path())
+        && let Ok(head) = Git::new(cwd).run_rev_parse_head()
+    {
+        return Ok(head);
     }
 
     // At wrapper level: prefer main, fallback to master.
@@ -280,6 +286,7 @@ pub fn run_where(wrapper: &Wrapper, branch: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn add_options_construction() {
@@ -298,5 +305,89 @@ mod tests {
         assert!(!opts.json);
         assert_eq!(opts.color, ColorPolicy::Auto);
         assert_eq!(opts.path, PathPolicy::Relative);
+    }
+
+    /// Runs a git command, returning trimmed stdout and failing on error.
+    fn run_git(dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Builds a minimal wrapper whose `.bare` is empty (no branches).
+    fn wrapper_with_empty_bare(root: &Path) -> Wrapper {
+        fs::create_dir_all(root.join(".bare")).unwrap();
+        fs::write(root.join(".git"), "gitdir: ./.bare\n").unwrap();
+        Wrapper::from_cwd(root).unwrap()
+    }
+
+    #[test]
+    fn base_ref_uses_head_inside_linked_directory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("proj");
+        let wrapper = wrapper_with_empty_bare(&root);
+
+        // A worktree directory holding an independent checkout.
+        let wt = root.join("main");
+        fs::create_dir_all(&wt).unwrap();
+        run_git(&wt, &["init", "--initial-branch=main"]);
+        run_git(&wt, &["config", "user.email", "t@example.com"]);
+        run_git(&wt, &["config", "user.name", "Test"]);
+        run_git(&wt, &["config", "commit.gpgsign", "false"]);
+        fs::write(wt.join("f"), "x").unwrap();
+        run_git(&wt, &["add", "."]);
+        run_git(&wt, &["commit", "-m", "initial"]);
+        let expected = run_git(&wt, &["rev-parse", "HEAD"]);
+
+        // Reach the same directory through a symlink into the wrapper.
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("link");
+            std::os::unix::fs::symlink(&root, &link).unwrap();
+            let got = determine_base_ref(&wrapper.git(), &wrapper, &link.join("main"));
+            assert_eq!(got.unwrap(), expected);
+        }
+        #[cfg(not(unix))]
+        assert_eq!(
+            determine_base_ref(&wrapper.git(), &wrapper, &wt).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn base_ref_errors_when_no_main_or_master() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("proj");
+
+        // A working repo whose only branch is not main/master.
+        let seed = tmp.path().join("seed");
+        fs::create_dir_all(&seed).unwrap();
+        run_git(&seed, &["init", "--initial-branch=dev"]);
+        run_git(&seed, &["config", "user.email", "t@example.com"]);
+        run_git(&seed, &["config", "user.name", "Test"]);
+        run_git(&seed, &["config", "commit.gpgsign", "false"]);
+        fs::write(seed.join("f"), "x").unwrap();
+        run_git(&seed, &["add", "."]);
+        run_git(&seed, &["commit", "-m", "initial"]);
+
+        // Promote its database into the wrapper's bare dir.
+        fs::create_dir_all(&root).unwrap();
+        fs::rename(seed.join(".git"), root.join(".bare")).unwrap();
+        fs::write(root.join(".git"), "gitdir: ./.bare\n").unwrap();
+        let wrapper = Wrapper::from_cwd(&root).unwrap();
+
+        let err = determine_base_ref(&wrapper.git(), &wrapper, &root).expect_err("must fail");
+        assert!(
+            err.to_string().contains("cannot determine base branch"),
+            "unexpected error: {err}"
+        );
     }
 }

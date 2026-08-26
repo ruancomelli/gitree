@@ -42,6 +42,19 @@ fn create_gitree_repo() -> (TempDir, std::path::PathBuf) {
     assert!(wrapper.join(".git").is_file());
     assert!(wrapper.join(".shared").is_dir());
 
+    // Local config does not survive a clone, so re-establish the
+    // no-signing/user settings on the shared database that every worktree
+    // inherits from.
+    git(
+        &wrapper.join(".bare"),
+        &["config", "commit.gpgsign", "false"],
+    );
+    git(
+        &wrapper.join(".bare"),
+        &["config", "user.email", "test@test.com"],
+    );
+    git(&wrapper.join(".bare"), &["config", "user.name", "Test"]);
+
     // Verify .git file content.
     let git_content = fs::read_to_string(wrapper.join(".git")).unwrap();
     assert!(git_content.contains("gitdir: ./.bare"));

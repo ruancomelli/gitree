@@ -85,6 +85,9 @@ pub enum GitreeError {
 impl GitreeError {
     /// Returns a formatted location suffix for the `DirtyWorktree` variant,
     /// e.g. ` 'main'` or an empty string when the branch is unknown.
+    ///
+    /// Lives on `self` so the `#[error(...)]` format string can call it while
+    /// matching the same variant.
     fn dirty_location(&self) -> String {
         match self {
             Self::DirtyWorktree { branch, .. } => branch

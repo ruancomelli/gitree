@@ -163,6 +163,9 @@ impl Git {
     /// Returns all remote branch names (without the `refs/remotes/origin/`
     /// prefix), excluding `HEAD` and the `origin/HEAD` symref.
     ///
+    /// Given `origin/feature/x` and the `origin/HEAD` symref, this yields
+    /// `["feature/x"]`: the symref's short name `HEAD` is filtered out below.
+    ///
     /// # Errors
     ///
     /// Returns an error if git fails.

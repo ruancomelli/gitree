@@ -1,4 +1,8 @@
 //! `gitree completion`, `gitree __complete`, `gitree __mangen`.
+//!
+//! Subcommands whose name starts with a double underscore are hidden internal
+//! helpers that generated completion scripts invoke; they are not part of the
+//! user-facing CLI surface.
 
 use std::collections::HashSet;
 use std::io::Write;

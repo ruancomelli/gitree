@@ -162,7 +162,8 @@ Canonical subcommand aliases (keep this list in sync with `Commands` in
 When adding or removing an alias, update this table, the `Commands` enum,
 and the README commands table together. Aliases are intentionally short
 (one to three characters) and must not collide with each other or with
-common git/gitree flags.
+common git/gitree flags. All other commands (`init`, `migrate`, `prune`,
+`where`, `root`, `clean`, `env`, `completion`) intentionally have no alias.
 
 ### Shell integration
 
@@ -239,8 +240,10 @@ installed by `gitree completion <shell>`:
 
 - **Always do:** Run `cargo fmt && cargo clippy --all-targets -- -D warnings
   && cargo test` after making changes. Add tests for new functionality.
-- **Always do:** Use the validated `BranchName` type when working with branch
-  names in `worktree.rs` — never pass raw strings to git.
+- **Always do:** Use the validated `BranchName` type for every
+  user-supplied branch name (`add`, `remove`, `switch`, `where`,
+  `pull --branch`) before it reaches git or a filesystem path — never pass
+  raw strings to git. This also blocks path traversal out of the wrapper.
 - **Always do:** Add new `git` operations as methods on `Git` in `git.rs`.
 - **Ask first:** Before adding new dependencies to `Cargo.toml`.
 - **Ask first:** Before changing the MSRV (`rust-version`).
@@ -259,6 +262,10 @@ installed by `gitree completion <shell>`:
 - Integration tests must set `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL`,
   `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GPG_TTY=""`, and
   `commit.gpgsign=false` to avoid signing agent issues.
+- Local config such as `commit.gpgsign=false` does **not** survive
+  `git clone`. After running `gitree init` in fixtures, re-set it (plus the
+  user identity) on `.bare` so every worktree — which inherits the shared
+  database's config — commits without touching a signing agent.
 - The `create_gitree_repo()` helper in `tests/integration.rs` builds a source
   repo and runs `gitree init` — reuse it for new tests.
 - **Add tests for every new command or behavior.** Tests are not optional.

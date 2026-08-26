@@ -459,7 +459,8 @@ fn convert_main_worktree(
     // worktree path (not the branch name), so a branch like
     // `feature/backport-adjacency-check` uses the state dir
     // `.bare/worktrees/backport-adjacency-check` — one level deep, matching
-    // the `commondir: ../..` that points back at `.bare`.
+    // the `commondir: ../..` that points back at `.bare`.  See the
+    // per-worktree admin layout in git's Documentation/git-worktree.txt.
     let state_name = main_dir
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

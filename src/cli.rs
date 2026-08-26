@@ -139,10 +139,6 @@ pub struct InitArgs {
     /// Wrapper directory name (defaults to repo name from URL).
     #[arg(long)]
     pub name: Option<String>,
-
-    /// Skip confirmation prompts.
-    #[arg(short, long)]
-    pub yes: bool,
 }
 
 /// Arguments for `gitree migrate`.

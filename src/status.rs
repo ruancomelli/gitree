@@ -91,7 +91,13 @@ pub fn run(wrapper: &Wrapper, opts: StatusOptions) -> Result<()> {
             let wt_git = wrapper.git_for(e.path.as_path());
             let branch = e.branch.clone().unwrap_or_else(|| "(detached)".into());
             let dirty = wt_git.dirty_count().unwrap_or(0);
-            let (ahead, behind) = wt_git.ahead_behind(&branch).unwrap_or((0, 0));
+            // Individual worktrees may be unreadable (locked, corrupt) or
+            // have no upstream; the overview degrades to zeros rather than
+            // failing wholesale.
+            let (ahead, behind) = match wt_git.ahead_behind(&branch) {
+                Ok(Some(counts)) => counts,
+                _ => (0, 0),
+            };
             StatusRow::from_entry(e, dirty, ahead, behind, opts.path, &cwd, home_ref)
         })
         .collect();

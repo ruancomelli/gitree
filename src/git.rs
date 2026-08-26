@@ -216,27 +216,36 @@ impl Git {
 
     /// Returns ahead/behind counts relative to `origin/<branch>`.
     ///
-    /// Returns `(ahead, behind)` or `(0, 0)` if the upstream is not
-    /// configured.
+    /// Returns `None` when the branch has no upstream on `origin`, and the
+    /// `(ahead, behind)` counts otherwise.
     ///
     /// # Errors
     ///
     /// Returns an error if git fails.
-    pub fn ahead_behind(&self, branch: &str) -> Result<(usize, usize)> {
+    pub fn ahead_behind(&self, branch: &str) -> Result<Option<(usize, usize)>> {
+        // A quiet existence probe separates "no upstream" (below) from
+        // genuine failures in the rev-list call; rev-list would otherwise
+        // fail ambiguously for both cases.
+        let remote_ref = format!("origin/{branch}");
+        if self
+            .run(&["rev-parse", "--verify", "--quiet", &remote_ref])
+            .is_err()
+        {
+            return Ok(None);
+        }
+
         let rev_list = self.run(&[
             "rev-list",
             "--left-right",
             "--count",
-            &format!("origin/{branch}...{branch}"),
+            &format!("{remote_ref}...{branch}"),
         ])?;
-        let parts: Vec<&str> = rev_list.split_whitespace().collect();
-        if parts.len() == 2 {
-            let ahead = parts[1].parse().unwrap_or(0);
-            let behind = parts[0].parse().unwrap_or(0);
-            Ok((ahead, behind))
-        } else {
-            Ok((0, 0))
-        }
+        let mut parts = rev_list.split_whitespace();
+        // Left side is `origin/<branch>`: commits we are behind; right side
+        // is `<branch>`: commits we are ahead.
+        let behind = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+        let ahead = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+        Ok(Some((ahead, behind)))
     }
 
     // -----------------------------------------------------------------------
@@ -610,6 +619,46 @@ mod tests {
             git.config_get("core.bare"),
             Err(GitreeError::GitFailed { .. })
         ));
+    }
+
+    #[test]
+    fn ahead_behind_without_upstream_is_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        run_git(tmp.path(), &["init", "--initial-branch=main"]);
+        run_git(tmp.path(), &["config", "user.email", "t@example.com"]);
+        run_git(tmp.path(), &["config", "user.name", "Test"]);
+        std::fs::write(tmp.path().join("f"), "x").unwrap();
+        run_git(tmp.path(), &["add", "."]);
+        run_git(tmp.path(), &["commit", "-m", "initial"]);
+
+        assert_eq!(Git::new(tmp.path()).ahead_behind("main").unwrap(), None);
+    }
+
+    #[test]
+    fn ahead_behind_counts_commits_vs_origin() {
+        // Source repo that acts as the clone's origin.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        run_git(&src, &["init", "--initial-branch=main"]);
+        run_git(&src, &["config", "user.email", "t@example.com"]);
+        run_git(&src, &["config", "user.name", "Test"]);
+        std::fs::write(src.join("f"), "x").unwrap();
+        run_git(&src, &["add", "."]);
+        run_git(&src, &["commit", "-m", "initial"]);
+
+        // Clone, then commit locally: 1 ahead, 0 behind.
+        let clone = tmp.path().join("clone");
+        run_git(
+            tmp.path(),
+            &["clone", src.to_str().unwrap(), clone.to_str().unwrap()],
+        );
+        std::fs::write(clone.join("g"), "y").unwrap();
+        run_git(&clone, &["add", "."]);
+        run_git(&clone, &["commit", "-m", "local work"]);
+
+        let git = Git::new(&clone);
+        assert_eq!(git.ahead_behind("main").unwrap(), Some((1, 0)));
     }
 
     /// Runs a git command, failing the test on non-zero exit.

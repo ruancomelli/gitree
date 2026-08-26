@@ -92,7 +92,7 @@ pub enum Commands {
 
     /// Show status overview of all worktrees.
     #[command(alias = "st")]
-    Status,
+    Status(StatusArgs),
 
     /// Health check for the gitree wrapper.
     #[command(alias = "doc")]
@@ -192,6 +192,23 @@ pub struct RemoveArgs {
 /// Arguments for `gitree list`.
 #[derive(Args, Debug)]
 pub struct ListArgs {
+    /// Output as JSON.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Color output: always, never, or auto.
+    #[arg(long, value_enum, default_value = "auto")]
+    pub color: ColorPolicy,
+
+    /// How to display worktree paths: relative (to CWD), absolute, or
+    /// abbreviated (home directory shown as `~`).
+    #[arg(long, value_enum, default_value = "relative")]
+    pub path: PathPolicy,
+}
+
+/// Arguments for `gitree status`.
+#[derive(Args, Debug)]
+pub struct StatusArgs {
     /// Output as JSON.
     #[arg(long)]
     pub json: bool,

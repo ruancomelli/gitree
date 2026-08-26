@@ -659,6 +659,213 @@ fn status_runs_successfully() {
 }
 
 #[test]
+fn status_alias_st_works() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["st"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("main"));
+}
+
+#[test]
+fn status_default_path_is_relative() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    let output = AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["status"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let s = String::from_utf8(output).unwrap();
+    let line = s.lines().find(|l| l.contains("main")).unwrap();
+    // From the wrapper root the worktree path is just the branch dir.
+    assert!(
+        line.ends_with("main"),
+        "expected line to end with relative path 'main', got: {line}"
+    );
+    // Must NOT contain the absolute wrapper path.
+    assert!(!line.contains(wrapper.to_str().unwrap()));
+}
+
+#[test]
+fn status_path_absolute_shows_full_path() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    let output = AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["status", "--path", "absolute"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let expected = wrapper.join("main");
+    let s = String::from_utf8(output).unwrap();
+    assert!(
+        s.contains(expected.to_str().unwrap()),
+        "expected absolute path {} in output: {s}",
+        expected.display()
+    );
+}
+
+#[test]
+fn status_path_abbreviated_uses_tilde() {
+    let (tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    // Pretend the temp dir is $HOME so the wrapper lives under it.
+    let output = AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["status", "--path", "abbreviated"])
+        .env("HOME", tmp.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let s = String::from_utf8(output).unwrap();
+    let line = s.lines().find(|l| l.contains("main")).unwrap();
+    assert!(
+        line.contains("~/"),
+        "expected '~/...' in abbreviated output, got: {line}"
+    );
+    assert!(!line.contains(tmp.path().to_str().unwrap()));
+}
+
+#[test]
+fn status_json_outputs_valid_json() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    let output = AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["status", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert!(parsed.is_array());
+    let main_row = parsed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v.get("branch").and_then(|b| b.as_str()) == Some("main"))
+        .unwrap();
+    // JSON should contain the structured fields.
+    assert!(main_row.get("path").is_some());
+    assert!(main_row.get("dirty").is_some());
+    assert!(main_row.get("ahead").is_some());
+    assert!(main_row.get("behind").is_some());
+}
+
+#[test]
+fn status_json_honors_path_policy() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    let output = AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["status", "--json", "--path", "relative"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let main_row = parsed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v.get("branch").and_then(|b| b.as_str()) == Some("main"))
+        .unwrap();
+    let path = main_row.get("path").and_then(|p| p.as_str()).unwrap();
+    assert_eq!(path, "main");
+}
+
+#[test]
+fn status_color_never_strips_ansi() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    let output = AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["status", "--color", "never"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let s = String::from_utf8(output).unwrap();
+    assert!(!s.contains('\x1b'));
+}
+
+#[test]
 fn clean_runs_successfully() {
     let (_tmp, wrapper) = create_gitree_repo();
 

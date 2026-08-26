@@ -161,9 +161,16 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             )
             .context("foreach failed")?;
         }
-        Commands::Status => {
+        Commands::Status(args) => {
             let wrapper = repo::Wrapper::discover()?;
-            status::run(&wrapper)?;
+            status::run(
+                &wrapper,
+                status::StatusOptions {
+                    json: args.json,
+                    color: args.color,
+                    path: args.path,
+                },
+            )?;
         }
         Commands::Doctor => {
             let wrapper = repo::Wrapper::discover()?;

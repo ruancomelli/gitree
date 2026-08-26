@@ -5,7 +5,7 @@
 //! and keeps gitree a thin ergonomic layer.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{GitreeError, Result};
@@ -63,6 +63,15 @@ impl Git {
 
     /// Runs a git command with extra env vars, returning trimmed stdout.
     fn run_with(&self, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
+        let output = self.exec(args, env)?;
+        Self::checked(output, &format!("git {}", args.join(" ")))
+    }
+
+    /// Spawns the git command, applying `env` overrides and verbose logging.
+    ///
+    /// Spawn failures map to [`GitreeError::GitNotFound`] /
+    /// [`GitreeError::Io`]; the caller inspects the returned raw output.
+    fn exec(&self, args: &[&str], env: &[(&str, &str)]) -> Result<Output> {
         let mut cmd = self.command(args);
         for (key, val) in env {
             cmd.env(key, val);
@@ -72,20 +81,25 @@ impl Git {
             eprintln!("git {}", args.join(" "));
         }
 
-        let output = cmd.output().map_err(|e| {
+        cmd.output().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 GitreeError::GitNotFound
             } else {
                 GitreeError::Io(e)
             }
-        })?;
+        })
+    }
 
+    /// Turns raw command output into trimmed stdout, or a
+    /// [`GitreeError::GitFailed`] carrying git's stderr.
+    fn checked(output: Output, summary: &str) -> Result<String> {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let summary = format!("git {}", args.join(" "));
-            return Err(GitreeError::GitFailed { summary, stderr });
+            return Err(GitreeError::GitFailed {
+                summary: summary.to_string(),
+                stderr,
+            });
         }
-
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
@@ -483,24 +497,8 @@ impl Git {
     pub fn clone_bare(url: &str, path: &Path) -> Result<()> {
         let path_str = path.to_string_lossy();
         let cwd = Git::cwd();
-        let mut cmd = cwd.command(&["clone", "--bare", url, &path_str]);
-        if VERBOSE.load(Ordering::Relaxed) {
-            eprintln!("git clone --bare {url} {path_str}");
-        }
-        let output = cmd.output().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                GitreeError::GitNotFound
-            } else {
-                GitreeError::Io(e)
-            }
-        })?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(GitreeError::GitFailed {
-                summary: format!("git clone --bare {url}"),
-                stderr,
-            });
-        }
+        let output = cwd.exec(&["clone", "--bare", url, &path_str], &[])?;
+        Git::checked(output, &format!("git clone --bare {url}"))?;
         Ok(())
     }
 }

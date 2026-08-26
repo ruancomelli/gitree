@@ -678,6 +678,118 @@ fn clean_runs_successfully() {
 }
 
 // ---------------------------------------------------------------------------
+// `gitree pull`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pull_dirty_worktree_names_branch_and_suggests_autostash() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    // Modify a tracked file to make the worktree dirty.
+    fs::write(wrapper.join("main").join("README.md"), "modified\n").unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["pull"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("working tree 'main' is dirty"))
+        .stderr(predicate::str::contains("1 uncommitted change"))
+        .stderr(predicate::str::contains("--autostash"))
+        .stderr(predicate::str::contains("worktree 'main'"));
+}
+
+#[test]
+fn pull_autostash_succeeds_with_dirty_worktree() {
+    let (_tmp, wrapper) = create_gitree_repo();
+    let src = _tmp.path().join("source.git");
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    // Configure the bare repo so stash (which creates commits) has an identity.
+    git(
+        &wrapper.join(".bare"),
+        &["config", "user.email", "test@test.com"],
+    );
+    git(&wrapper.join(".bare"), &["config", "user.name", "Test"]);
+    git(
+        &wrapper.join(".bare"),
+        &["config", "commit.gpgsign", "false"],
+    );
+
+    // Add a second commit to the source so there's something to fast-forward to.
+    fs::write(src.join("new-file.txt"), "new\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "-m", "second"]);
+
+    // Modify a tracked file in the worktree.
+    let readme = wrapper.join("main").join("README.md");
+    fs::write(&readme, "modified\n").unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@test.com")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@test.com")
+        .env("GPG_TTY", "")
+        .args(["pull", "--autostash"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Fast-forwarding"))
+        .stderr(predicate::str::contains("Done"));
+
+    // The modification should be preserved (autostash popped it back).
+    assert_eq!(fs::read_to_string(&readme).unwrap(), "modified\n");
+    // The new file from the fast-forward should be present.
+    assert!(wrapper.join("main").join("new-file.txt").exists());
+}
+
+#[test]
+fn pull_clean_worktree_fast_forwards() {
+    let (_tmp, wrapper) = create_gitree_repo();
+    let src = _tmp.path().join("source.git");
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    // Add a second commit to the source so there's something to fast-forward to.
+    fs::write(src.join("new-file.txt"), "new\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "-m", "second"]);
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["pull"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Fast-forwarding"))
+        .stderr(predicate::str::contains("Done"));
+
+    // The new file from the fast-forward should be present.
+    assert!(wrapper.join("main").join("new-file.txt").exists());
+}
+
+// ---------------------------------------------------------------------------
 // `gitree migrate`
 // ---------------------------------------------------------------------------
 

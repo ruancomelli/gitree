@@ -79,7 +79,7 @@ before considering work done.** Fix all warnings and test failures.
 src/
 ├── main.rs            # Entry point, clap dispatch, anyhow context, error hints
 ├── cli.rs             # Clap derive: Cli, Commands enum, per-subcommand Args
-├── error.rs           # GitreeError (thiserror), Result<T> alias, exit codes
+├── error.rs           # GitreeError (thiserror), DirtyEscape, Result<T> alias, exit codes
 ├── types.rs           # Newtypes: BranchName, BareDir, SharedDir, WorktreePath
 ├── git.rs             # Typed Git wrapper: all `git` invocations go through here
 ├── repo.rs            # Wrapper discovery + methods (find wrapper root from CWD)
@@ -88,7 +88,7 @@ src/
 ├── worktree.rs        # `gitree add/remove/list/prune/where`
 ├── switch.rs          # `gitree switch/root` — prints cd command with shell escaping
 ├── foreach.rs         # `gitree foreach` — run command in all worktrees
-├── pull.rs            # `gitree pull` — fetch + fast-forward main
+├── pull.rs            # `gitree pull` — fetch + fast-forward main (--autostash support)
 ├── status.rs          # `gitree status` — overview with dirty/ahead/behind
 ├── doctor.rs          # `gitree doctor` — health check
 ├── clean.rs           # `gitree clean` — prune + delete stale branches
@@ -117,7 +117,11 @@ output, and testability.
 
 - **Library-level (`src/*.rs` except `main.rs`):** Return `error::Result<T>`
   (which is `Result<T, GitreeError>`). Use `?` for propagation. Add new
-  variants to `GitreeError` in `error.rs` for new error categories.
+  variants to `GitreeError` in `error.rs` for new error categories. The
+  `DirtyWorktree` variant is a struct carrying `count`, `branch`, `path`, and
+  `escape` (a `DirtyEscape` enum: `Autostash` or `Force`) so that `hint_for`
+  in `main.rs` can tell the user *which* worktree is dirty and *which* flag
+  bypasses the check.
 - **Application-level (`main.rs` only):** Use `anyhow::Context` to add
   human-readable context to operations. The `run()` function returns
   `anyhow::Result<()>`. The `main()` function prints the full error chain

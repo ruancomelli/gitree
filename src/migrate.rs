@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::error::{GitreeError, Result};
+use crate::error::{DirtyEscape, GitreeError, Result};
 use crate::git::{Git, WorktreeEntry};
 use crate::init;
 use crate::shared;
@@ -163,7 +163,12 @@ fn preflight(git: &Git, cwd: &Path, opts: &MigrateOptions) -> Result<PreflightRe
     // Check 3: working tree must be clean.
     let dirty_count = git.dirty_count()?;
     if dirty_count > 0 && !opts.force {
-        return Err(GitreeError::DirtyWorktree(dirty_count));
+        return Err(GitreeError::DirtyWorktree {
+            count: dirty_count,
+            branch: Some(main_branch.to_string()),
+            path: Some(cwd.to_path_buf()),
+            escape: DirtyEscape::Force,
+        });
     }
 
     // Check 4: list untracked files.

@@ -144,6 +144,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 &wrapper,
                 PullOptions {
                     branch: args.branch,
+                    autostash: args.autostash,
                 },
             )
             .context("failed to pull")?;
@@ -180,7 +181,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
 /// Returns a helpful hint for specific error types.
 fn hint_for(err: &error::GitreeError) -> Option<String> {
-    use error::GitreeError;
+    use error::{DirtyEscape, GitreeError};
     match err {
         GitreeError::NotAWrapper(_) => Some(
             "run `gitree init <url>` to create a new repository, \
@@ -193,9 +194,32 @@ fn hint_for(err: &error::GitreeError) -> Option<String> {
         GitreeError::WorktreeExists(name) => {
             Some(format!("to switch to it: eval \"$(gitree switch {name})\""))
         }
-        GitreeError::DirtyWorktree(count) => Some(format!(
-            "commit or stash {count} change(s) first, or use --force"
-        )),
+        GitreeError::DirtyWorktree {
+            branch,
+            path,
+            escape,
+            ..
+        } => {
+            let mut hint = String::new();
+            if let Some(p) = path {
+                if let Some(b) = branch {
+                    hint.push_str(&format!("worktree '{b}' is at {} — ", p.display()));
+                } else {
+                    hint.push_str(&format!("worktree is at {} — ", p.display()));
+                }
+            }
+            match escape {
+                DirtyEscape::Autostash => {
+                    hint.push_str("commit or stash before pulling, or use --autostash to stash and pull automatically");
+                }
+                DirtyEscape::Force => {
+                    hint.push_str(
+                        "commit or stash before migrating, or use --force to proceed anyway",
+                    );
+                }
+            }
+            Some(hint)
+        }
         GitreeError::GitNotFound => Some("install git and ensure it is on your PATH".into()),
         _ => None,
     }

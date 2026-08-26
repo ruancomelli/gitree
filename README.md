@@ -191,10 +191,12 @@ Prints the filesystem path of a worktree.
 
 Prints the wrapper root directory.
 
-### `gitree pull [--branch <name>]`
+### `gitree pull [--branch <name>] [--autostash]`
 
 Fetches from origin and fast-forwards the main worktree (or a specified
-branch's worktree) if it is clean.
+branch's worktree) if it is clean. If the worktree is dirty, the error names
+the branch and path. Use `--autostash` to stash uncommitted changes before
+merging and pop them afterwards.
 
 ### `gitree foreach <command> [--parallel] [--only <glob>]`
 

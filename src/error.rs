@@ -11,6 +11,15 @@ use std::process::ExitCode;
 /// A specialised `Result` type used throughout gitree.
 pub type Result<T> = std::result::Result<T, GitreeError>;
 
+/// The escape hatch available when a worktree is dirty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirtyEscape {
+    /// `--autostash`: stash, ff-merge, pop (used by `pull`).
+    Autostash,
+    /// `--force`: bypass the dirty pre-check (used by `migrate`).
+    Force,
+}
+
 /// The main error type for gitree operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -44,8 +53,17 @@ pub enum GitreeError {
     BranchNotFound(String),
 
     /// The working tree is dirty and the operation requires a clean state.
-    #[error("working tree is dirty: {0} uncommitted change(s)")]
-    DirtyWorktree(usize),
+    #[error("working tree{loc} is dirty: {count} uncommitted change(s)", loc = self.dirty_location())]
+    DirtyWorktree {
+        /// Number of uncommitted changes.
+        count: usize,
+        /// The branch name of the dirty worktree, if known.
+        branch: Option<String>,
+        /// The filesystem path of the dirty worktree, if known.
+        path: Option<PathBuf>,
+        /// The escape hatch available to the user.
+        escape: DirtyEscape,
+    },
 
     /// A pre-flight check failed during `migrate`.
     #[error("pre-flight check failed: {0}")]
@@ -65,6 +83,18 @@ pub enum GitreeError {
 }
 
 impl GitreeError {
+    /// Returns a formatted location suffix for the `DirtyWorktree` variant,
+    /// e.g. ` 'main'` or an empty string when the branch is unknown.
+    fn dirty_location(&self) -> String {
+        match self {
+            Self::DirtyWorktree { branch, .. } => branch
+                .as_deref()
+                .map(|b| format!(" '{b}'"))
+                .unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+
     /// Returns the exit code that should be used when this error is the
     /// top-level failure.
     #[must_use]
@@ -73,5 +103,38 @@ impl GitreeError {
             Self::NotAWrapper(_) => ExitCode::from(3),
             _ => ExitCode::from(1),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dirty_worktree_display_with_branch() {
+        let err = GitreeError::DirtyWorktree {
+            count: 3,
+            branch: Some("main".into()),
+            path: Some(PathBuf::from("/home/user/proj/main")),
+            escape: DirtyEscape::Autostash,
+        };
+        assert_eq!(
+            err.to_string(),
+            "working tree 'main' is dirty: 3 uncommitted change(s)"
+        );
+    }
+
+    #[test]
+    fn dirty_worktree_display_without_branch() {
+        let err = GitreeError::DirtyWorktree {
+            count: 1,
+            branch: None,
+            path: None,
+            escape: DirtyEscape::Force,
+        };
+        assert_eq!(
+            err.to_string(),
+            "working tree is dirty: 1 uncommitted change(s)"
+        );
     }
 }

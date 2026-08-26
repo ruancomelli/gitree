@@ -373,11 +373,19 @@ impl Git {
 
     /// Runs `git merge --ff-only <ref>` in the current directory.
     ///
+    /// When `autostash` is `true`, passes `--autostash` so that uncommitted
+    /// changes are stashed before the merge and popped afterwards.
+    ///
     /// # Errors
     ///
     /// Returns an error if git fails.
-    pub fn merge_ff_only(&self, refspec: &str) -> Result<()> {
-        self.run(&["merge", "--ff-only", refspec])?;
+    pub fn merge_ff_only(&self, refspec: &str, autostash: bool) -> Result<()> {
+        let mut args: Vec<&str> = vec!["merge", "--ff-only"];
+        if autostash {
+            args.push("--autostash");
+        }
+        args.push(refspec);
+        self.run(&args)?;
         Ok(())
     }
 

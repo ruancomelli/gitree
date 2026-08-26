@@ -1,6 +1,6 @@
 //! `gitree pull` — fetch + fast-forward main.
 
-use crate::error::{GitreeError, Result};
+use crate::error::{DirtyEscape, GitreeError, Result};
 use crate::repo::Wrapper;
 
 /// Options for `gitree pull`.
@@ -8,6 +8,8 @@ use crate::repo::Wrapper;
 pub struct PullOptions {
     /// Override the branch to fast-forward (default: main, fallback master).
     pub branch: Option<String>,
+    /// Stash uncommitted changes before merging, pop afterwards.
+    pub autostash: bool,
 }
 
 /// Runs the `pull` command.
@@ -47,13 +49,20 @@ pub fn run(wrapper: &Wrapper, opts: PullOptions) -> Result<()> {
 
     let main_git = wrapper.git_for(main_wt.path.as_path());
 
-    let dirty_count = main_git.dirty_count()?;
-    if dirty_count > 0 {
-        return Err(GitreeError::DirtyWorktree(dirty_count));
+    if !opts.autostash {
+        let dirty_count = main_git.dirty_count()?;
+        if dirty_count > 0 {
+            return Err(GitreeError::DirtyWorktree {
+                count: dirty_count,
+                branch: Some(branch.clone()),
+                path: Some(main_wt.path.clone()),
+                escape: DirtyEscape::Autostash,
+            });
+        }
     }
 
     eprintln!("Fast-forwarding '{branch}' …");
-    main_git.merge_ff_only(&format!("origin/{branch}"))?;
+    main_git.merge_ff_only(&format!("origin/{branch}"), opts.autostash)?;
 
     eprintln!("Done.");
     Ok(())

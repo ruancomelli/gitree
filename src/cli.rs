@@ -226,6 +226,10 @@ pub struct PullArgs {
     /// Override the branch to fast-forward (default: main, fallback master).
     #[arg(long)]
     pub branch: Option<String>,
+
+    /// Stash uncommitted changes before merging, pop afterwards.
+    #[arg(long)]
+    pub autostash: bool,
 }
 
 /// Arguments for `gitree foreach`.

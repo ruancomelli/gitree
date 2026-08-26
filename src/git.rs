@@ -426,17 +426,27 @@ impl Git {
     /// Gets a git config value, or `None` if the key is unset.
     ///
     /// Returns an error only for genuine git failures (e.g. corrupt repo),
-    /// not for a simply-unset key (exit code 1).
+    /// not for a simply-unset key (`git config --get` exits 1 silently).
     ///
     /// # Errors
     ///
-    /// Returns an error if git fails for a reason other than the key being
+    /// Returns an error if git fails for any reason other than the key being
     /// unset.
     pub fn config_get(&self, key: &str) -> Result<Option<String>> {
-        match self.run(&["config", "--get", key]) {
-            Ok(val) => Ok(Some(val)),
-            Err(GitreeError::GitFailed { stderr, .. }) if stderr.is_empty() => Ok(None),
-            Err(e) => Err(e),
+        let args = ["config", "--get", key];
+        let output = self.exec(&args, &[])?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        match output.status.code() {
+            Some(0) => Ok(Some(
+                String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            )),
+            // Exit 1 with empty stderr is git's "key not found" convention;
+            // anything else is a genuine failure that must not be swallowed.
+            Some(1) if stderr.trim().is_empty() => Ok(None),
+            _ => Err(GitreeError::GitFailed {
+                summary: format!("git {}", args.join(" ")),
+                stderr: stderr.trim().to_string(),
+            }),
         }
     }
 
@@ -590,6 +600,48 @@ impl WorktreeEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_get_set_unset_and_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        run_git(tmp.path(), &["init"]);
+        run_git(tmp.path(), &["config", "user.email", "t@example.com"]);
+        let git = Git::new(tmp.path());
+
+        assert_eq!(
+            git.config_get("user.email").unwrap().as_deref(),
+            Some("t@example.com")
+        );
+        // A distinctive key name avoids collisions with any global config.
+        assert_eq!(git.config_get("gitree.test.absent-key").unwrap(), None);
+    }
+
+    #[test]
+    fn config_get_corrupt_gitfile_is_error() {
+        // A malformed `.git` file makes every git invocation fail with a
+        // fatal error — this must propagate, not be reported as "unset".
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".git"), b"not a gitfile").unwrap();
+        let git = Git::new(tmp.path());
+        assert!(matches!(
+            git.config_get("core.bare"),
+            Err(GitreeError::GitFailed { .. })
+        ));
+    }
+
+    /// Runs a git command, failing the test on non-zero exit.
+    fn run_git(dir: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn parse_single_worktree() {

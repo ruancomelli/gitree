@@ -126,19 +126,16 @@ impl WorktreeRow {
 pub fn render_text(rows: &[WorktreeRow], use_color: bool, out: &mut impl Write) {
     for row in rows {
         let dirty_marker = if row.dirty { " *" } else { "" };
-        if use_color && row.dirty {
-            let _ = writeln!(
-                out,
-                "{}  \x1b[33m{}\x1b[0m  {}{}",
-                row.head, row.branch, row.path_str, dirty_marker
-            );
+        let branch = if use_color && row.dirty {
+            format!("\x1b[33m{}\x1b[0m", row.branch)
         } else {
-            let _ = writeln!(
-                out,
-                "{}  {}  {}{}",
-                row.head, row.branch, row.path_str, dirty_marker
-            );
-        }
+            row.branch.clone()
+        };
+        let _ = writeln!(
+            out,
+            "{}  {branch}  {}{dirty_marker}",
+            row.head, row.path_str
+        );
     }
 }
 

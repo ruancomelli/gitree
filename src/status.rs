@@ -112,44 +112,27 @@ pub fn run(wrapper: &Wrapper, opts: StatusOptions) -> Result<()> {
 /// Renders the status overview as plain text (Git-style).
 pub fn render_text(rows: &[StatusRow], use_color: bool, out: &mut impl Write) {
     for row in rows {
-        let dirty_marker = if row.dirty > 0 {
-            format!(
-                " ({} change{})",
-                row.dirty,
-                if row.dirty == 1 { "" } else { "s" }
-            )
-        } else {
-            String::new()
-        };
-        let ab = if row.ahead > 0 || row.behind > 0 {
-            format!(" ↑{}↓{}", row.ahead, row.behind)
-        } else {
-            String::new()
+        let changes = (row.dirty > 0).then(|| {
+            let plural = if row.dirty == 1 { "" } else { "s" };
+            format!(" ({} change{plural})", row.dirty)
+        });
+        let offsets =
+            (row.ahead > 0 || row.behind > 0).then(|| format!(" ↑{}↓{}", row.ahead, row.behind));
+
+        let paint = |code: &str, part: Option<String>| match part {
+            Some(s) if use_color => format!("\x1b[{code}m{s}\x1b[0m"),
+            Some(s) => s,
+            None => String::new(),
         };
 
-        if use_color {
-            let dirty_part = if row.dirty > 0 {
-                format!("\x1b[33m{dirty_marker}\x1b[0m")
-            } else {
-                dirty_marker
-            };
-            let ab_part = if row.ahead > 0 || row.behind > 0 {
-                format!("\x1b[36m{ab}\x1b[0m")
-            } else {
-                ab
-            };
-            let _ = writeln!(
-                out,
-                "{:<30} {}{}{}",
-                row.branch, row.path_str, dirty_part, ab_part
-            );
-        } else {
-            let _ = writeln!(
-                out,
-                "{:<30} {}{}{}",
-                row.branch, row.path_str, dirty_marker, ab
-            );
-        }
+        let _ = writeln!(
+            out,
+            "{:<30} {}{}{}",
+            row.branch,
+            row.path_str,
+            paint("33", changes),
+            paint("36", offsets),
+        );
     }
 }
 

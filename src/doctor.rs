@@ -2,7 +2,8 @@
 
 use std::io::Write;
 
-use crate::error::Result;
+use crate::error::{GitreeError, Result};
+use crate::git::Git;
 use crate::repo::Wrapper;
 
 /// A single health check result.
@@ -120,25 +121,21 @@ fn check_fsck(wrapper: &Wrapper) -> Check {
 }
 
 fn check_git_installed() -> Check {
-    let result = std::process::Command::new("git").arg("--version").output();
-    match result {
-        Ok(output) if output.status.success() => {
-            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            Check {
-                name: "git",
-                passed: true,
-                message: Some(version),
-            }
-        }
-        Ok(_) => Check {
+    match Git::cwd().version() {
+        Ok(version) => Check {
             name: "git",
-            passed: false,
-            message: Some("git --version exited non-zero".into()),
+            passed: true,
+            message: Some(version),
         },
-        Err(_) => Check {
+        Err(GitreeError::GitNotFound) => Check {
             name: "git",
             passed: false,
             message: Some("git not found on PATH".into()),
+        },
+        Err(e) => Check {
+            name: "git",
+            passed: false,
+            message: Some(format!("{e}")),
         },
     }
 }

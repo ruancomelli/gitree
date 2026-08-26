@@ -37,6 +37,16 @@ impl Git {
         Self::new(PathBuf::from("."))
     }
 
+    /// Returns the installed git version string (e.g. `git version 2.43.0`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GitreeError::GitNotFound`] if git is not on PATH, or
+    /// [`GitreeError::GitFailed`] if the command exits non-zero.
+    pub fn version(&self) -> Result<String> {
+        self.run(&["--version"])
+    }
+
     // -----------------------------------------------------------------------
     // Low-level runner
     // -----------------------------------------------------------------------

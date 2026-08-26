@@ -519,6 +519,82 @@ fn add_fails_for_nonexistent_branch_without_new() {
 }
 
 #[test]
+fn switch_rejects_invalid_branch_names() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["switch", "../escape"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("branch name"));
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["switch", "foo bar"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("branch name"));
+}
+
+#[test]
+fn where_rejects_invalid_branch_names() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["where", ".."])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("branch name"));
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["where", "foo/../bar"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("branch name"));
+}
+
+#[test]
+fn remove_rejects_invalid_branch_names() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["remove", "../escape"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("branch name"));
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["rm", "branch.lock"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("branch name"));
+}
+
+#[test]
+fn pull_rejects_invalid_branch_override() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["pull", "--branch", "foo/../bar"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("branch name"));
+}
+
+#[test]
 fn add_fails_for_duplicate_worktree() {
     let (_tmp, wrapper) = create_gitree_repo();
 

@@ -4,6 +4,7 @@ use std::io::Write;
 
 use crate::error::{GitreeError, Result};
 use crate::repo::Wrapper;
+use crate::types::BranchName;
 
 /// Shell-escapes a path for use in a `cd '...'` command.
 ///
@@ -23,7 +24,8 @@ fn shell_escape(s: &str) -> String {
 ///
 /// Returns an error if no worktree exists for the branch.
 pub fn run_switch(wrapper: &Wrapper, branch: &str) -> Result<()> {
-    let path = wrapper.worktree_path(branch);
+    let branch = BranchName::new(branch)?;
+    let path = wrapper.worktree_path(branch.as_str());
     if !path.as_path().exists() {
         return Err(GitreeError::PathMissing(path.into_pathbuf()));
     }

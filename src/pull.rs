@@ -2,6 +2,7 @@
 
 use crate::error::{DirtyEscape, GitreeError, Result};
 use crate::repo::Wrapper;
+use crate::types::BranchName;
 
 /// Options for `gitree pull`.
 #[derive(Debug, Clone)]
@@ -27,7 +28,7 @@ pub fn run(wrapper: &Wrapper, opts: PullOptions) -> Result<()> {
     eprintln!("Fetching origin …");
     git.fetch()?;
 
-    let branch = opts.branch.unwrap_or_else(|| {
+    let requested = opts.branch.unwrap_or_else(|| {
         let local = git.local_branches().unwrap_or_default();
         if local.iter().any(|b| b == "main") {
             "main".into()
@@ -35,6 +36,7 @@ pub fn run(wrapper: &Wrapper, opts: PullOptions) -> Result<()> {
             "master".into()
         }
     });
+    let branch = BranchName::new(&requested)?;
 
     let worktrees = git.worktree_list()?;
     let main_wt = worktrees
@@ -54,7 +56,7 @@ pub fn run(wrapper: &Wrapper, opts: PullOptions) -> Result<()> {
         if dirty_count > 0 {
             return Err(GitreeError::DirtyWorktree {
                 count: dirty_count,
-                branch: Some(branch.clone()),
+                branch: Some(branch.to_string()),
                 path: Some(main_wt.path.clone()),
                 escape: DirtyEscape::Autostash,
             });
@@ -62,7 +64,7 @@ pub fn run(wrapper: &Wrapper, opts: PullOptions) -> Result<()> {
     }
 
     eprintln!("Fast-forwarding '{branch}' …");
-    main_git.merge_ff_only(&format!("origin/{branch}"), opts.autostash)?;
+    main_git.merge_ff_only(&format!("origin/{}", branch.as_str()), opts.autostash)?;
 
     eprintln!("Done.");
     Ok(())

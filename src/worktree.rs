@@ -154,7 +154,8 @@ pub struct RemoveOptions {
 ///
 /// Returns an error if the worktree doesn't exist or git fails.
 pub fn run_remove(wrapper: &Wrapper, opts: RemoveOptions) -> Result<()> {
-    let worktree_path = wrapper.worktree_path(&opts.branch);
+    let branch = BranchName::new(&opts.branch)?;
+    let worktree_path = wrapper.worktree_path(branch.as_str());
 
     if !worktree_path.as_path().exists() {
         return Err(GitreeError::PathMissing(worktree_path.into_pathbuf()));
@@ -165,8 +166,8 @@ pub fn run_remove(wrapper: &Wrapper, opts: RemoveOptions) -> Result<()> {
     git.worktree_remove(worktree_path.as_path(), opts.force)?;
 
     if opts.delete_branch {
-        eprintln!("Deleting branch '{}' …", opts.branch);
-        git.branch_delete(&opts.branch, opts.force)?;
+        eprintln!("Deleting branch '{branch}' …");
+        git.branch_delete(branch.as_str(), opts.force)?;
     }
 
     eprintln!("Done.");
@@ -262,7 +263,8 @@ pub fn run_prune(wrapper: &Wrapper) -> Result<()> {
 ///
 /// Returns an error if no worktree exists for the branch.
 pub fn run_where(wrapper: &Wrapper, branch: &str) -> Result<()> {
-    let path = wrapper.worktree_path(branch);
+    let branch = BranchName::new(branch)?;
+    let path = wrapper.worktree_path(branch.as_str());
     if !path.as_path().exists() {
         return Err(GitreeError::PathMissing(path.into_pathbuf()));
     }

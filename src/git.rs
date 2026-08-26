@@ -127,29 +127,6 @@ impl Git {
         Ok(PathBuf::from(out))
     }
 
-    /// Returns the path to the git directory of the current worktree
-    /// (`$GIT_DIR`).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if git is unavailable or the path is not inside a
-    /// repository.
-    #[allow(dead_code)]
-    pub fn git_dir(&self) -> Result<PathBuf> {
-        let out = self.run(&["rev-parse", "--git-dir"])?;
-        Ok(PathBuf::from(out))
-    }
-
-    /// Returns the current branch name (short form).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if HEAD is detached or git fails.
-    #[allow(dead_code)]
-    pub fn current_branch(&self) -> Result<String> {
-        self.run(&["rev-parse", "--abbrev-ref", "HEAD"])
-    }
-
     /// Returns `true` if the working tree has uncommitted changes.
     ///
     /// # Errors

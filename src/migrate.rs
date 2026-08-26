@@ -650,16 +650,17 @@ fn linked_branches(report: &PreflightReport) -> Vec<&str> {
 }
 
 /// Recursively computes the size of a directory in bytes.
-/// Does not follow symlinks to prevent infinite loops.
+///
+/// [`fs::DirEntry::metadata`] does not traverse symlinks, so symlink loops
+/// cannot recurse indefinitely and linked targets are counted once by their
+/// own entry.
 fn dir_size(path: &Path) -> u64 {
     let mut total = 0u64;
     if let Ok(entries) = fs::read_dir(path) {
         for entry in entries.flatten() {
-            let path = entry.path();
-            // Use symlink_metadata to avoid following symlinks.
             if let Ok(meta) = entry.metadata() {
-                if meta.is_dir() && !meta.file_type().is_symlink() {
-                    total += dir_size(&path);
+                if meta.is_dir() {
+                    total += dir_size(&entry.path());
                 } else {
                     total += meta.len();
                 }

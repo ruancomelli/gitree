@@ -8,7 +8,6 @@
 //! `<wrapper>/<branch>/` and converts the main worktree into a linked
 //! worktree, matching the layout produced by `gitree init` + `gitree add`.
 
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -431,14 +430,14 @@ fn convert_main_worktree(
     // Compute the set of top-level entries to leave in place: the git
     // database, the wrapper-level git/shared dirs, and the directories that
     // hold each worktree (main + linked).
-    let skip = skip_top_level_dirs(cwd, main_branch, linked_branches);
+    let skip = skip_top_level_dirs(main_branch, linked_branches);
 
     // Move every other top-level entry into the worktree directory.
     for entry in fs::read_dir(cwd)? {
         let entry = entry?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if skip.contains(name_str.as_ref()) {
+        if skip.iter().any(|s| *s == name_str) {
             continue;
         }
         let dest = main_dir.join(&name);
@@ -531,20 +530,27 @@ fn convert_main_worktree(
     Ok(())
 }
 
-/// Returns the set of top-level directory names that must stay in place during
-/// the main-worktree conversion: `.git`, `.bare`, `.shared`, and the directory
-/// holding each worktree (main + linked).
-fn skip_top_level_dirs(cwd: &Path, main_branch: &str, linked_branches: &[&str]) -> HashSet<String> {
-    let mut skip = HashSet::new();
-    for name in [".git", ".bare", ".shared"] {
-        skip.insert(name.to_string());
-    }
+/// Top-level entries of a wrapper that must stay in place during the
+/// main-worktree conversion.
+const RESERVED_TOP_LEVEL: &[&str] = &[".git", ".bare", ".shared"];
+
+/// Returns the names of top-level entries that must stay in place during the
+/// main-worktree conversion: [`RESERVED_TOP_LEVEL`] plus the top-level
+/// directory holding each worktree (main + linked).
+fn skip_top_level_dirs(main_branch: &str, linked_branches: &[&str]) -> Vec<String> {
+    let mut skip: Vec<String> = RESERVED_TOP_LEVEL
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
     for branch in std::iter::once(main_branch).chain(linked_branches.iter().copied()) {
-        let path = cwd.join(branch);
-        if let Ok(rel) = path.strip_prefix(cwd)
-            && let Some(top) = rel.iter().next()
-        {
-            skip.insert(top.to_string_lossy().into_owned());
+        // Worktree directories live at `<wrapper>/<branch>`, so the top-level
+        // entry to keep is the branch's first path component.
+        let top = Path::new(branch)
+            .components()
+            .next()
+            .filter(|c| matches!(c, std::path::Component::Normal(_)));
+        if let Some(top) = top {
+            skip.push(top.as_os_str().to_string_lossy().into_owned());
         }
     }
     skip
@@ -728,21 +734,14 @@ mod tests {
 
     #[test]
     fn skip_top_level_dirs_includes_reserved_and_worktree_dirs() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let cwd = tmp.path();
-        fs::create_dir_all(cwd.join(".bare")).unwrap();
-        fs::create_dir_all(cwd.join(".shared")).unwrap();
-        fs::create_dir_all(cwd.join("main")).unwrap();
-        fs::create_dir_all(cwd.join("feature")).unwrap();
-
-        let skip = skip_top_level_dirs(cwd, "main", &["feature/test", "add-version-command"]);
-        assert!(skip.contains(".git"));
-        assert!(skip.contains(".bare"));
-        assert!(skip.contains(".shared"));
-        assert!(skip.contains("main"));
-        assert!(skip.contains("feature"));
-        assert!(skip.contains("add-version-command"));
-        assert!(!skip.contains("src"));
+        let skip = skip_top_level_dirs("main", &["feature/test", "add-version-command"]);
+        assert!(skip.iter().any(|s| s == ".git"));
+        assert!(skip.iter().any(|s| s == ".bare"));
+        assert!(skip.iter().any(|s| s == ".shared"));
+        assert!(skip.iter().any(|s| s == "main"));
+        assert!(skip.iter().any(|s| s == "feature"));
+        assert!(skip.iter().any(|s| s == "add-version-command"));
+        assert!(!skip.iter().any(|s| s == "src"));
     }
 
     #[test]

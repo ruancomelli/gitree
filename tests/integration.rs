@@ -23,7 +23,6 @@ fn create_gitree_repo() -> (TempDir, std::path::PathBuf) {
     git(&src, &["init", "--initial-branch=main"]);
     git(&src, &["config", "user.email", "test@test.com"]);
     git(&src, &["config", "user.name", "Test"]);
-    git(&src, &["config", "commit.gpgsign", "false"]);
     fs::write(src.join("README.md"), "# Test\n").unwrap();
     git(&src, &["add", "."]);
     git(&src, &["commit", "-m", "initial"]);
@@ -67,9 +66,13 @@ fn create_gitree_repo() -> (TempDir, std::path::PathBuf) {
 }
 
 /// Runs git in a directory.
+///
+/// Prepends `-c commit.gpgsign=false` so no test commit ever touches a
+/// signing agent, regardless of repo or global git config.
 fn git(dir: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .current_dir(dir)
+        .args(["-c", "commit.gpgsign=false"])
         .args(args)
         .env("GIT_COMMITTER_NAME", "Test")
         .env("GIT_COMMITTER_EMAIL", "test@test.com")
@@ -102,7 +105,6 @@ fn create_regular_clone() -> (TempDir, std::path::PathBuf) {
     git(&src, &["init", "--initial-branch=main"]);
     git(&src, &["config", "user.email", "test@test.com"]);
     git(&src, &["config", "user.name", "Test"]);
-    git(&src, &["config", "commit.gpgsign", "false"]);
     fs::write(src.join("README.md"), "# Test\n").unwrap();
     git(&src, &["add", "."]);
     git(&src, &["commit", "-m", "initial"]);
@@ -1057,17 +1059,6 @@ fn pull_autostash_succeeds_with_dirty_worktree() {
         .assert()
         .success();
 
-    // Configure the bare repo so stash (which creates commits) has an identity.
-    git(
-        &wrapper.join(".bare"),
-        &["config", "user.email", "test@test.com"],
-    );
-    git(&wrapper.join(".bare"), &["config", "user.name", "Test"]);
-    git(
-        &wrapper.join(".bare"),
-        &["config", "commit.gpgsign", "false"],
-    );
-
     // Add a second commit to the source so there's something to fast-forward to.
     fs::write(src.join("new-file.txt"), "new\n").unwrap();
     git(&src, &["add", "."]);
@@ -1077,14 +1068,12 @@ fn pull_autostash_succeeds_with_dirty_worktree() {
     let readme = wrapper.join("main").join("README.md");
     fs::write(&readme, "modified\n").unwrap();
 
+    // Stash (triggered by --autostash) creates commits; the shared `.bare`
+    // config set by `create_gitree_repo` supplies the no-sign setting and
+    // identity for them.
     AssertCommand::cargo_bin("gitree")
         .unwrap()
         .current_dir(&wrapper)
-        .env("GIT_COMMITTER_NAME", "Test")
-        .env("GIT_COMMITTER_EMAIL", "test@test.com")
-        .env("GIT_AUTHOR_NAME", "Test")
-        .env("GIT_AUTHOR_EMAIL", "test@test.com")
-        .env("GPG_TTY", "")
         .args(["pull", "--autostash"])
         .assert()
         .success()

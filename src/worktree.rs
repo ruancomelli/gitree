@@ -308,9 +308,13 @@ mod tests {
     }
 
     /// Runs a git command, returning trimmed stdout and failing on error.
+    ///
+    /// Prepends `-c commit.gpgsign=false` so no test commit ever touches a
+    /// signing agent, regardless of repo or global git config.
     fn run_git(dir: &Path, args: &[&str]) -> String {
         let output = std::process::Command::new("git")
             .current_dir(dir)
+            .args(["-c", "commit.gpgsign=false"])
             .args(args)
             .output()
             .unwrap();
@@ -341,7 +345,6 @@ mod tests {
         run_git(&wt, &["init", "--initial-branch=main"]);
         run_git(&wt, &["config", "user.email", "t@example.com"]);
         run_git(&wt, &["config", "user.name", "Test"]);
-        run_git(&wt, &["config", "commit.gpgsign", "false"]);
         fs::write(wt.join("f"), "x").unwrap();
         run_git(&wt, &["add", "."]);
         run_git(&wt, &["commit", "-m", "initial"]);
@@ -373,7 +376,6 @@ mod tests {
         run_git(&seed, &["init", "--initial-branch=dev"]);
         run_git(&seed, &["config", "user.email", "t@example.com"]);
         run_git(&seed, &["config", "user.name", "Test"]);
-        run_git(&seed, &["config", "commit.gpgsign", "false"]);
         fs::write(seed.join("f"), "x").unwrap();
         run_git(&seed, &["add", "."]);
         run_git(&seed, &["commit", "-m", "initial"]);

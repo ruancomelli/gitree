@@ -260,12 +260,16 @@ installed by `gitree completion <shell>`:
 - **Integration tests** live in `tests/integration.rs` and use `assert_cmd`
   to run the compiled binary against temporary git repos.
 - Integration tests must set `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL`,
-  `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GPG_TTY=""`, and
-  `commit.gpgsign=false` to avoid signing agent issues.
-- Local config such as `commit.gpgsign=false` does **not** survive
-  `git clone`. After running `gitree init` in fixtures, re-set it (plus the
-  user identity) on `.bare` so every worktree — which inherits the shared
-  database's config — commits without touching a signing agent.
+  `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, and `GPG_TTY=""` on every git
+  invocation (the `git()` helper does this), so tests never rely on global
+  git identity.
+- The `git()` and `run_git()` test helpers prepend `-c commit.gpgsign=false`
+  to every git invocation — direct test commits never touch a signing agent,
+  regardless of repo or global config. Fixtures additionally set
+  `commit.gpgsign=false` and user identity on `.bare` (or on the clone's
+  `.git` before migrate) because local config does not survive `git clone`
+  and gitree-spawned operations such as `pull --autostash` create stash
+  commits that inherit the shared database's config.
 - The `create_gitree_repo()` helper in `tests/integration.rs` builds a source
   repo and runs `gitree init` — reuse it for new tests.
 - **Add tests for every new command or behavior.** Tests are not optional.

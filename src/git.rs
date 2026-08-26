@@ -630,8 +630,6 @@ mod tests {
         run_git(tmp.path(), &["init", "--initial-branch=main"]);
         run_git(tmp.path(), &["config", "user.email", "t@example.com"]);
         run_git(tmp.path(), &["config", "user.name", "Test"]);
-        // Signing may be enabled globally; keep commits fast and offline.
-        run_git(tmp.path(), &["config", "commit.gpgsign", "false"]);
         std::fs::write(tmp.path().join("f"), "x").unwrap();
         run_git(tmp.path(), &["add", "."]);
         run_git(tmp.path(), &["commit", "-m", "initial"]);
@@ -648,7 +646,6 @@ mod tests {
         run_git(&src, &["init", "--initial-branch=main"]);
         run_git(&src, &["config", "user.email", "t@example.com"]);
         run_git(&src, &["config", "user.name", "Test"]);
-        run_git(&src, &["config", "commit.gpgsign", "false"]);
         std::fs::write(src.join("f"), "x").unwrap();
         run_git(&src, &["add", "."]);
         run_git(&src, &["commit", "-m", "initial"]);
@@ -659,7 +656,6 @@ mod tests {
             tmp.path(),
             &["clone", src.to_str().unwrap(), clone.to_str().unwrap()],
         );
-        run_git(&clone, &["config", "commit.gpgsign", "false"]);
         std::fs::write(clone.join("g"), "y").unwrap();
         run_git(&clone, &["add", "."]);
         run_git(&clone, &["commit", "-m", "local work"]);
@@ -669,9 +665,13 @@ mod tests {
     }
 
     /// Runs a git command, failing the test on non-zero exit.
+    ///
+    /// Prepends `-c commit.gpgsign=false` so no test commit ever touches a
+    /// signing agent, regardless of repo or global git config.
     fn run_git(dir: &Path, args: &[&str]) {
         let output = std::process::Command::new("git")
             .current_dir(dir)
+            .args(["-c", "commit.gpgsign=false"])
             .args(args)
             .output()
             .unwrap();

@@ -129,8 +129,8 @@ fn all_branches(git: &Git) -> Vec<String> {
 }
 
 /// Appends a bash wrapper that intercepts branch positional completion for
-/// `add`/`remove`/`switch`/`where` and `--base` values, delegating to
-/// `gitree __complete <context>`.
+/// `add`/`remove`/`switch`/`where` (and their aliases) and `--base` values,
+/// delegating to `gitree __complete <context>`.
 fn append_bash_overrides(buffer: &mut Vec<u8>) {
     let script = r#"
 
@@ -149,6 +149,14 @@ if declare -F _gitree >/dev/null 2>&1; then
             cur="${COMP_WORDS[COMP_CWORD]}"
         fi
         prev="$3"
+
+        # Normalize subcommand aliases so branch completion fires when the
+        # user types `a`, `rm`, or `sw`.
+        case "${sub}" in
+            a) sub="add" ;;
+            rm) sub="remove" ;;
+            sw) sub="switch" ;;
+        esac
 
         case "${sub}" in
             add)
@@ -250,15 +258,19 @@ _gitree_complete_base() {
 }
 
 /// Appends fish `complete` rules that offer branch names for the relevant
-/// subcommands and base refs for `add --base`.
+/// subcommands and base refs for `add --base`.  The guards match the
+/// canonical subcommand names *and* their aliases, since the helper checks
+/// the literal token the user typed.
 fn append_fish_overrides(buffer: &mut Vec<u8>) {
     let script = r#"
 
 # gitree: dynamic branch completion (appended by `gitree completion fish`).
-complete -c gitree -n '__fish_gitree_using_subcommand add; and not __fish_contains_opt -s n new' -f -a '(gitree __complete add)' -d 'Branch'
-complete -c gitree -n '__fish_gitree_using_subcommand add; and __fish_prev_arg_in --base' -f -a '(gitree __complete base)' -d 'Base ref'
-complete -c gitree -n '__fish_gitree_using_subcommand remove' -f -a '(gitree __complete remove)' -d 'Branch'
-complete -c gitree -n '__fish_gitree_using_subcommand switch' -f -a '(gitree __complete switch)' -d 'Branch'
+# Without these rules fish falls back to file completion for branch
+# positionals, so `gtr rm <prefix><TAB>` offers directory names.
+complete -c gitree -n '__fish_gitree_using_subcommand add a; and not __fish_contains_opt -s n new' -f -a '(gitree __complete add)' -d 'Branch'
+complete -c gitree -n '__fish_gitree_using_subcommand add a; and __fish_prev_arg_in --base' -f -a '(gitree __complete base)' -d 'Base ref'
+complete -c gitree -n '__fish_gitree_using_subcommand remove rm' -f -a '(gitree __complete remove)' -d 'Branch'
+complete -c gitree -n '__fish_gitree_using_subcommand switch sw' -f -a '(gitree __complete switch)' -d 'Branch'
 complete -c gitree -n '__fish_gitree_using_subcommand where' -f -a '(gitree __complete where)' -d 'Branch'
 "#;
     buffer.extend_from_slice(script.as_bytes());

@@ -525,6 +525,8 @@ pub struct WorktreeEntry {
     pub bare: bool,
     /// Whether this worktree is locked.
     pub locked: bool,
+    /// Whether git considers this worktree prunable (its gitdir is stale).
+    pub prunable: bool,
 }
 
 impl WorktreeEntry {
@@ -553,6 +555,7 @@ impl WorktreeEntry {
                         branch: None,
                         bare: false,
                         locked: false,
+                        prunable: false,
                     });
                 }
                 "HEAD" => {
@@ -576,6 +579,11 @@ impl WorktreeEntry {
                 "locked" => {
                     if let Some(ref mut entry) = current {
                         entry.locked = true;
+                    }
+                }
+                "prunable" => {
+                    if let Some(ref mut entry) = current {
+                        entry.prunable = true;
                     }
                 }
                 _ => {}
@@ -717,5 +725,17 @@ mod tests {
         let entries = WorktreeEntry::parse(input);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn parse_prunable_and_locked() {
+        let input = "worktree /home/user/project/gone\nHEAD abc123\nbranch refs/heads/feature\nprunable gitdir file points to non-existent location\n\nworktree /home/user/project/locked\nHEAD def456\nbranch refs/heads/locked\nlocked reason\nprunable gitdir file points to non-existent location\n\nworktree /home/user/project/main\nHEAD 789abc\nbranch refs/heads/main\n";
+        let entries = WorktreeEntry::parse(input);
+        assert_eq!(entries.len(), 3);
+        assert!(entries[0].prunable);
+        assert!(!entries[0].locked);
+        assert!(entries[1].prunable && entries[1].locked);
+        assert!(!entries[2].prunable);
+        assert!(!entries[2].locked);
     }
 }

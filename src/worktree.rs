@@ -1,7 +1,7 @@
 //! `gitree add`, `gitree remove`, `gitree list`, `gitree prune`, `gitree where`.
 
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::{GitreeError, Result};
 use crate::format::{self, ColorPolicy, PathPolicy, WorktreeRow};
@@ -250,12 +250,33 @@ pub fn run_list(wrapper: &Wrapper, opts: ListOptions) -> Result<()> {
 
 /// Runs the `prune` command.
 ///
+/// Reports which stale worktree references were removed, or a friendly
+/// note when there were none.
+///
 /// # Errors
 ///
 /// Returns an error if git fails.
 pub fn run_prune(wrapper: &Wrapper) -> Result<()> {
-    wrapper.git().worktree_prune()?;
-    eprintln!("Pruned stale worktree references.");
+    let git = wrapper.git();
+    let stale: Vec<PathBuf> = git
+        .worktree_list()?
+        .iter()
+        // Locked worktrees are never removed by `git worktree prune`.
+        .filter(|e| e.prunable && !e.locked)
+        .map(|e| e.path.clone())
+        .collect();
+
+    git.worktree_prune()?;
+
+    if stale.is_empty() {
+        eprintln!("No stale worktree references.");
+        return Ok(());
+    }
+
+    eprintln!("Pruned stale worktree references:");
+    for path in &stale {
+        eprintln!("  {}", path.display());
+    }
     Ok(())
 }
 

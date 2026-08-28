@@ -200,6 +200,7 @@ mod tests {
             branch: Some("main".into()),
             bare: false,
             locked: false,
+            prunable: false,
         };
         let row =
             WorktreeRow::from_entry(&entry, false, PathPolicy::Absolute, Path::new("/tmp"), None);
@@ -217,6 +218,7 @@ mod tests {
             branch: None,
             bare: false,
             locked: false,
+            prunable: false,
         };
         let row =
             WorktreeRow::from_entry(&entry, true, PathPolicy::Absolute, Path::new("/tmp"), None);

@@ -163,6 +163,7 @@ mod tests {
             branch: Some("main".into()),
             bare: false,
             locked: false,
+            prunable: false,
         }
     }
 
@@ -223,6 +224,7 @@ mod tests {
             branch: None,
             bare: false,
             locked: false,
+            prunable: false,
         };
         let row = StatusRow::from_entry(
             &entry,

@@ -643,7 +643,7 @@ fn not_a_gitree_repo_errors() {
 }
 
 #[test]
-fn prune_runs_successfully() {
+fn prune_reports_no_stale_references() {
     let (_tmp, wrapper) = create_gitree_repo();
 
     AssertCommand::cargo_bin("gitree")
@@ -658,7 +658,43 @@ fn prune_runs_successfully() {
         .current_dir(&wrapper)
         .args(["prune"])
         .assert()
+        .success()
+        .stderr(predicate::str::contains("No stale worktree references"));
+}
+
+#[test]
+fn prune_lists_removed_worktree_references() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
         .success();
+
+    // Delete the worktree directory out from under git, leaving a stale
+    // reference behind.
+    let stale_path = wrapper.join("main");
+    fs::remove_dir_all(&stale_path).unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["prune"])
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("Pruned stale worktree references")
+                .and(predicate::str::contains(stale_path.to_str().unwrap())),
+        );
+
+    // The stale reference no longer appears in the worktree list.
+    let listed = git(&wrapper, &["worktree", "list", "--porcelain"]);
+    assert!(
+        !listed.contains(stale_path.to_str().unwrap()),
+        "stale reference still listed after prune: {listed}"
+    );
 }
 
 #[test]

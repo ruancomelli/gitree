@@ -76,6 +76,8 @@ The `gitree env` script (above) automatically wires `gtr` and `gtrsw` to these
 completions, so `gtr l<TAB>` offers `list`, `gtrsw <branch><TAB>` offers branch
 names, etc. The completion file must be installed separately (the `env` script
 only adds the wiring; the candidate rules come from `gitree completion`).
+Branch arguments of `add`, `remove`, `switch`, and `where` complete from
+branch names for both canonical and aliased subcommand spellings.
 
 ### Manpages
 
@@ -166,6 +168,10 @@ def5678  feature/x      /home/user/project/feature/x *
 Removes one or more worktrees. With `--delete-branch`, also deletes the
 local branches.
 
+Each argument may be a plain branch name, a directory-style name
+(`branch/`, as offered by shell completion), or the worktree's path
+(relative or absolute).
+
 ### `gitree prune`
 
 Cleans stale worktree references (e.g. after manually deleting a worktree
@@ -173,8 +179,9 @@ directory).
 
 ### `gitree switch <branch>`
 
-Prints a `cd` command for the worktree. Use with `eval` or the `gtr` shell
-function:
+Prints a `cd` command for the worktree. Like `remove`, the argument may also
+be a directory-style name (`branch/`) or the worktree's path. Use with `eval`
+or the `gtr` shell function:
 
 ```sh
 # Manual
@@ -186,7 +193,8 @@ gtrsw main
 
 ### `gitree where <branch>`
 
-Prints the filesystem path of a worktree.
+Prints the filesystem path of a worktree. The argument may also be a
+directory-style name (`branch/`) or the worktree's path.
 
 ### `gitree root`
 

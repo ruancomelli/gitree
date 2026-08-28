@@ -684,6 +684,158 @@ fn remove_rejects_invalid_branch_names() {
 }
 
 #[test]
+fn remove_accepts_trailing_slash_directory_form() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["rm", "main/"])
+        .assert()
+        .success();
+
+    assert!(!wrapper.join("main").exists());
+}
+
+#[test]
+fn remove_accepts_directory_and_path_forms_mixed() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "feature/test", "--new"])
+        .assert()
+        .success();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["rm", "main/", "./feature/test/"])
+        .assert()
+        .success();
+
+    assert!(!wrapper.join("main").exists());
+    assert!(!wrapper.join("feature/test").exists());
+}
+
+#[test]
+fn remove_accepts_absolute_worktree_path() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["rm", wrapper.join("main").to_str().unwrap()])
+        .assert()
+        .success();
+
+    assert!(!wrapper.join("main").exists());
+}
+
+#[test]
+fn remove_trailing_slash_works_from_inside_another_worktree() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "feature/test", "--new"])
+        .assert()
+        .success();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(wrapper.join("main"))
+        .args(["rm", "feature/test/"])
+        .assert()
+        .success();
+
+    assert!(!wrapper.join("feature/test").exists());
+    assert!(wrapper.join("main").exists());
+}
+
+#[test]
+fn remove_rejects_traversal_with_trailing_slash() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["rm", "../escape/"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("branch name"));
+}
+
+#[test]
+fn where_accepts_trailing_slash_directory_form() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["where", "main/"])
+        .assert()
+        .stdout(predicate::str::contains("main"))
+        .success();
+}
+
+#[test]
+fn switch_accepts_trailing_slash_directory_form() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["switch", "main/"])
+        .assert()
+        .stdout(predicate::str::contains("cd"))
+        .stdout(predicate::str::contains("main"))
+        .success();
+}
+
+#[test]
 fn pull_rejects_invalid_branch_override() {
     let (_tmp, wrapper) = create_gitree_repo();
 
@@ -1654,6 +1806,12 @@ fn completion_bash_contains_dynamic_overrides() {
     assert!(script.contains("gitree __complete base"));
     assert!(script.contains("gitree __complete \"${sub}\""));
     assert!(script.contains("__gitree_clap_orig"));
+    assert!(
+        script.contains("a) sub=\"add\"")
+            && script.contains("rm) sub=\"remove\"")
+            && script.contains("sw) sub=\"switch\""),
+        "bash script should normalize subcommand aliases"
+    );
 }
 
 #[test]
@@ -1704,6 +1862,12 @@ fn completion_fish_contains_dynamic_overrides() {
     assert!(script.contains("gitree __complete switch"));
     assert!(script.contains("gitree __complete where"));
     assert!(script.contains("gitree __complete base"));
+    assert!(
+        script.contains("__fish_gitree_using_subcommand remove rm")
+            && script.contains("__fish_gitree_using_subcommand add a")
+            && script.contains("__fish_gitree_using_subcommand switch sw"),
+        "fish script should match subcommand aliases"
+    );
 }
 
 #[test]

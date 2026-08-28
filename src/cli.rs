@@ -173,7 +173,8 @@ pub struct AddArgs {
 /// Arguments for `gitree remove`.
 #[derive(Args, Debug)]
 pub struct RemoveArgs {
-    /// Branch names whose worktrees to remove.
+    /// Branch names whose worktrees to remove.  Worktree directories (as
+    /// completed by the shell, e.g. `branch/`) are also accepted.
     pub branches: Vec<String>,
 
     /// Also delete the local branch.
@@ -222,14 +223,15 @@ pub struct StatusArgs {
 /// Arguments for `gitree switch`.
 #[derive(Args, Debug)]
 pub struct SwitchArgs {
-    /// Branch name to switch to.
+    /// Branch name to switch to.  A worktree directory (e.g. `branch/`)
+    /// also works.
     pub branch: String,
 }
 
 /// Arguments for `gitree where`.
 #[derive(Args, Debug)]
 pub struct WhereArgs {
-    /// Branch name.
+    /// Branch name.  A worktree directory (e.g. `branch/`) also works.
     pub branch: String,
 }
 

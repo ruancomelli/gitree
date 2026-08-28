@@ -171,7 +171,7 @@ pub fn run_remove(wrapper: &Wrapper, opts: RemoveOptions) -> Result<()> {
 }
 
 fn remove_one(wrapper: &Wrapper, branch: &str, opts: &RemoveOptions) -> Result<()> {
-    let branch = BranchName::new(branch)?;
+    let branch = wrapper.resolve_branch_arg(branch)?;
     let worktree_path = wrapper.worktree_path(branch.as_str());
 
     if !worktree_path.as_path().exists() {
@@ -296,11 +296,14 @@ pub fn run_prune(wrapper: &Wrapper) -> Result<()> {
 /// Runs the `where` command — prints the path of a worktree for the given
 /// branch.
 ///
+/// Accepts plain branch names, directory-style names (`branch/`), and
+/// worktree paths.
+///
 /// # Errors
 ///
 /// Returns an error if no worktree exists for the branch.
 pub fn run_where(wrapper: &Wrapper, branch: &str) -> Result<()> {
-    let branch = BranchName::new(branch)?;
+    let branch = wrapper.resolve_branch_arg(branch)?;
     let path = wrapper.worktree_path(branch.as_str());
     if !path.as_path().exists() {
         return Err(GitreeError::PathMissing(path.into_pathbuf()));

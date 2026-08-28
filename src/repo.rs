@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{GitreeError, Result};
 use crate::git::Git;
-use crate::types::{BareDir, SharedDir, WorktreePath};
+use crate::types::{BareDir, BranchName, SharedDir, WorktreePath};
 
 /// The wrapper root directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +143,61 @@ impl Wrapper {
         Git::new(path)
     }
 
+    /// Resolves a user-supplied branch argument to a [`BranchName`].
+    ///
+    /// Accepts plain branch names, directory-style names (`branch/`,
+    /// `./branch/`), and worktree paths, relative or absolute.  Trailing
+    /// slashes are common because shells tab-complete worktree directories.
+    ///
+    /// The fast path validates the trimmed argument as a branch name, which
+    /// works from any working directory.  As a fallback the argument is
+    /// resolved as a filesystem path and matched against the worktrees git
+    /// reports, so only real worktree branches can come back from it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`BranchName`] validation error when the argument is
+    /// neither a valid branch name nor the path of an existing worktree.
+    pub fn resolve_branch_arg(&self, raw: &str) -> Result<BranchName> {
+        let trimmed = raw.trim_end_matches('/');
+        if !trimmed.starts_with('/')
+            && let Ok(branch) = BranchName::new(trimmed)
+        {
+            return Ok(branch);
+        }
+        if !trimmed.is_empty()
+            && let Some(branch) = self.branch_at_path(raw)
+        {
+            return Ok(branch);
+        }
+        BranchName::new(trimmed)
+    }
+
+    /// Returns the branch of the worktree at `raw` (relative to CWD or
+    /// absolute), or `None` when no worktree matches.
+    fn branch_at_path(&self, raw: &str) -> Option<BranchName> {
+        let candidate = PathBuf::from(raw);
+        let candidate = if candidate.is_absolute() {
+            candidate
+        } else {
+            std::env::current_dir().ok()?.join(candidate)
+        };
+        let resolved = candidate.canonicalize().unwrap_or(candidate);
+
+        self.git()
+            .worktree_list()
+            .ok()?
+            .into_iter()
+            .find_map(|entry| {
+                let path = entry.path.canonicalize().unwrap_or(entry.path);
+                if path != resolved {
+                    return None;
+                }
+                let branch = entry.branch?;
+                BranchName::new(&branch).ok()
+            })
+    }
+
     /// Returns `true` if `.shared/` exists.
     #[must_use]
     pub fn has_shared_dir(&self) -> bool {
@@ -257,5 +312,110 @@ mod tests {
         assert!(wrapper.has_shared_dir());
         assert!(wrapper.has_bare_dir());
         assert!(wrapper.has_git_file());
+    }
+
+    /// Runs a git command, returning trimmed stdout and failing on error.
+    ///
+    /// Prepends `-c commit.gpgsign=false` so no test commit ever touches a
+    /// signing agent, regardless of repo or global git config.
+    fn run_git(dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GPG_TTY", "")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Builds a wrapper with real `main` and `feature/test` worktrees.
+    fn wrapper_with_worktrees(root: &Path) -> Wrapper {
+        let seed = root.join("seed");
+        fs::create_dir_all(&seed).unwrap();
+        run_git(&seed, &["init", "--initial-branch=main"]);
+        run_git(&seed, &["config", "user.email", "t@example.com"]);
+        run_git(&seed, &["config", "user.name", "Test"]);
+        fs::write(seed.join("f"), "x").unwrap();
+        run_git(&seed, &["add", "."]);
+        run_git(&seed, &["commit", "-m", "initial"]);
+
+        // Bare clone (config does not survive a clone), then the .git file.
+        let proj = root.join("proj");
+        fs::create_dir_all(&proj).unwrap();
+        run_git(
+            root,
+            &[
+                "clone",
+                "--bare",
+                seed.to_str().unwrap(),
+                proj.join(".bare").to_str().unwrap(),
+            ],
+        );
+        run_git(
+            &proj.join(".bare"),
+            &["config", "user.email", "t@example.com"],
+        );
+        run_git(&proj.join(".bare"), &["config", "user.name", "Test"]);
+        fs::write(proj.join(".git"), "gitdir: ./.bare\n").unwrap();
+        let wrapper = Wrapper::from_cwd(&proj).unwrap();
+
+        run_git(&proj, &["worktree", "add", "main", "main"]);
+        run_git(
+            &proj,
+            &["worktree", "add", "feature/test", "-b", "feature/test"],
+        );
+        wrapper
+    }
+
+    #[test]
+    fn resolve_branch_arg_accepts_trailing_slash() {
+        let tmp = TempDir::new().unwrap();
+        let wrapper = wrapper_with_worktrees(tmp.path());
+        assert_eq!(
+            wrapper.resolve_branch_arg("main/").unwrap().as_str(),
+            "main"
+        );
+    }
+
+    #[test]
+    fn resolve_branch_arg_resolves_worktree_path() {
+        let tmp = TempDir::new().unwrap();
+        let wrapper = wrapper_with_worktrees(tmp.path());
+        let abs = wrapper.path().join("main").display().to_string();
+        assert_eq!(wrapper.resolve_branch_arg(&abs).unwrap().as_str(), "main");
+    }
+
+    #[test]
+    fn resolve_branch_arg_resolves_nested_worktree_path() {
+        let tmp = TempDir::new().unwrap();
+        let wrapper = wrapper_with_worktrees(tmp.path());
+        let nested = wrapper.path().join("feature/test").display().to_string();
+        assert_eq!(
+            wrapper.resolve_branch_arg(&nested).unwrap().as_str(),
+            "feature/test"
+        );
+    }
+
+    #[test]
+    fn resolve_branch_arg_errors_for_invalid_names() {
+        let tmp = TempDir::new().unwrap();
+        let wrapper = wrapper_with_worktrees(tmp.path());
+        for bad in ["../escape/", "branch.lock/", ""] {
+            let err = wrapper.resolve_branch_arg(bad).expect_err("must fail");
+            assert!(
+                err.to_string().contains("branch name"),
+                "unexpected error for {bad}: {err}"
+            );
+        }
     }
 }

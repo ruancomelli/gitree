@@ -244,6 +244,9 @@ installed by `gitree completion <shell>`:
   user-supplied branch name (`add`, `remove`, `switch`, `where`,
   `pull --branch`) before it reaches git or a filesystem path — never pass
   raw strings to git. This also blocks path traversal out of the wrapper.
+  For `remove`, `switch`, and `where`, resolve the argument with
+  `Wrapper::resolve_branch_arg` so directory-style names (`branch/`) and
+  worktree paths are accepted, not just plain branch names.
 - **Always do:** Add new `git` operations as methods on `Git` in `git.rs`.
 - **Ask first:** Before adding new dependencies to `Cargo.toml`.
 - **Ask first:** Before changing the MSRV (`rust-version`).

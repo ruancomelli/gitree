@@ -121,10 +121,20 @@ fn zsh_script(alias: &str) -> String {
 
 {core}
 # Completions: {alias} delegates to the gitree zsh completion function
-# (installed via `gitree completion zsh`).  `compdef` is available after
-# `compinit`; guard in case this script is sourced before compinit runs.
+# (installed via `gitree completion zsh`).  `compdef` is only available
+# after `compinit`; if this script is sourced earlier, defer registration
+# to the first prompt instead of silently skipping it.
 if command -v compdef >/dev/null 2>&1; then
     compdef _gitree {alias}
+else
+    autoload -Uz add-zsh-hook
+    _{alias}_defer_compdef() {{
+        if command -v compdef >/dev/null 2>&1; then
+            compdef _gitree {alias}
+            add-zsh-hook -d _{alias}_defer_compdef
+        fi
+    }}
+    add-zsh-hook precmd _{alias}_defer_compdef
 fi
 "#,
         core = bash_zsh_core(alias)
@@ -222,6 +232,8 @@ mod tests {
         assert!(script.contains("gtr()"));
         assert!(script.contains("gtrsw"));
         assert!(script.contains("compdef _gitree gtr"));
+        assert!(script.contains("add-zsh-hook precmd _gtr_defer_compdef"));
+        assert!(script.contains("add-zsh-hook -d _gtr_defer_compdef"));
     }
 
     #[test]
@@ -230,6 +242,7 @@ mod tests {
         assert!(script.contains("wt()"));
         assert!(script.contains("wtsw"));
         assert!(script.contains("compdef _gitree wt"));
+        assert!(script.contains("_wt_defer_compdef"));
     }
 
     #[test]

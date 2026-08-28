@@ -58,7 +58,7 @@ pub enum Commands {
     #[command(alias = "a")]
     Add(AddArgs),
 
-    /// Remove a worktree.
+    /// Remove one or more worktrees.
     #[command(alias = "rm")]
     Remove(RemoveArgs),
 
@@ -173,8 +173,8 @@ pub struct AddArgs {
 /// Arguments for `gitree remove`.
 #[derive(Args, Debug)]
 pub struct RemoveArgs {
-    /// Branch name whose worktree to remove.
-    pub branch: String,
+    /// Branch names whose worktrees to remove.
+    pub branches: Vec<String>,
 
     /// Also delete the local branch.
     #[arg(long)]

@@ -111,7 +111,7 @@ cd main
 | `gitree init <url>` | | Create a new wrapper from a remote URL |
 | `gitree migrate` | | Convert a regular clone to a gitree wrapper |
 | `gitree add <branch>` | `a` | Add a worktree for a branch |
-| `gitree remove <branch>` | `rm` | Remove a worktree |
+| `gitree remove <branch>...` | `rm` | Remove one or more worktrees |
 | `gitree list` | `ls` | List all worktrees |
 | `gitree prune` | | Prune stale worktree references |
 | `gitree switch <branch>` | `sw` | Print a `cd` command for `eval` |
@@ -161,9 +161,10 @@ abc1234  main           /home/user/project/main
 def5678  feature/x      /home/user/project/feature/x *
 ```
 
-### `gitree remove <branch> [--delete-branch] [--force]`
+### `gitree remove <branch>... [--delete-branch] [--force]`
 
-Removes a worktree. With `--delete-branch`, also deletes the local branch.
+Removes one or more worktrees. With `--delete-branch`, also deletes the
+local branches.
 
 ### `gitree prune`
 

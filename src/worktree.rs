@@ -147,8 +147,8 @@ fn determine_base_ref(git: &Git, wrapper: &Wrapper, cwd: &Path) -> Result<String
 /// Options for `gitree remove`.
 #[derive(Debug, Clone)]
 pub struct RemoveOptions {
-    /// The branch name.
-    pub branch: String,
+    /// The branch names.
+    pub branches: Vec<String>,
     /// Also delete the local branch after removing the worktree.
     pub delete_branch: bool,
     /// Force removal even if the worktree is dirty.
@@ -157,11 +157,21 @@ pub struct RemoveOptions {
 
 /// Runs the `remove` command.
 ///
+/// Removes one worktree per branch, stopping at the first failure.
+///
 /// # Errors
 ///
-/// Returns an error if the worktree doesn't exist or git fails.
+/// Returns an error if a worktree doesn't exist or git fails.
 pub fn run_remove(wrapper: &Wrapper, opts: RemoveOptions) -> Result<()> {
-    let branch = BranchName::new(&opts.branch)?;
+    opts.branches
+        .iter()
+        .try_for_each(|branch| remove_one(wrapper, branch, &opts))?;
+    eprintln!("Done.");
+    Ok(())
+}
+
+fn remove_one(wrapper: &Wrapper, branch: &str, opts: &RemoveOptions) -> Result<()> {
+    let branch = BranchName::new(branch)?;
     let worktree_path = wrapper.worktree_path(branch.as_str());
 
     if !worktree_path.as_path().exists() {
@@ -177,7 +187,6 @@ pub fn run_remove(wrapper: &Wrapper, opts: RemoveOptions) -> Result<()> {
         git.branch_delete(branch.as_str(), opts.force)?;
     }
 
-    eprintln!("Done.");
     Ok(())
 }
 

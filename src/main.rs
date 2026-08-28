@@ -104,7 +104,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             worktree::run_remove(
                 &wrapper,
                 worktree::RemoveOptions {
-                    branch: args.branch,
+                    branches: args.branches,
                     delete_branch: args.delete_branch,
                     force: args.force,
                 },

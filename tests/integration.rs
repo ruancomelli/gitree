@@ -448,6 +448,93 @@ fn remove_alias_rm_works() {
 }
 
 #[test]
+fn remove_removes_multiple_worktrees() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "feature/test", "--new"])
+        .assert()
+        .success();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["rm", "main", "feature/test"])
+        .assert()
+        .success();
+
+    assert!(!wrapper.join("main").exists());
+    assert!(!wrapper.join("feature/test").exists());
+}
+
+#[test]
+fn remove_multiple_with_delete_branch_deletes_all_branches() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "feature/test", "--new"])
+        .assert()
+        .success();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["rm", "feature/test", "main", "--delete-branch"])
+        .assert()
+        .success();
+
+    assert!(!wrapper.join("main").exists());
+    assert!(!wrapper.join("feature/test").exists());
+
+    let branches = git(&wrapper.join(".bare"), &["branch", "--list"]);
+    assert!(
+        !branches.contains("main") && !branches.contains("feature/test"),
+        "branches should be deleted: {branches}"
+    );
+}
+
+#[test]
+fn remove_multiple_stops_at_first_missing_worktree() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["rm", "nonexistent", "main"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("error:"));
+
+    assert!(
+        wrapper.join("main").exists(),
+        "branches after the failure must not be removed"
+    );
+}
+
+#[test]
 fn switch_prints_cd_command() {
     let (_tmp, wrapper) = create_gitree_repo();
 

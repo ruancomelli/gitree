@@ -143,6 +143,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             pull::run(
                 &wrapper,
                 PullOptions {
+                    all: args.all,
                     branch: args.branch,
                     autostash: args.autostash,
                 },

@@ -1391,6 +1391,160 @@ fn pull_clean_worktree_fast_forwards() {
     assert!(wrapper.join("main").join("new-file.txt").exists());
 }
 
+/// Sets up a wrapper with `main` and `feat-a` worktrees, then advances both
+/// branches on the origin so both are behind and can be fast-forwarded.
+fn setup_two_branch_wrapper(tmp: &TempDir, wrapper: &Path) {
+    let src = tmp.path().join("source.git");
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    // Create and push a feature branch from the main worktree.
+    let main_wt = wrapper.join("main");
+    git(&main_wt, &["checkout", "-b", "feat-a"]);
+    fs::write(main_wt.join("feat.txt"), "feat\n").unwrap();
+    git(&main_wt, &["add", "."]);
+    git(&main_wt, &["commit", "-m", "feat-a"]);
+    git(&main_wt, &["push", "origin", "feat-a"]);
+    git(&main_wt, &["checkout", "main"]);
+
+    // Create a worktree for the feature branch.
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(wrapper)
+        .args(["add", "feat-a"])
+        .assert()
+        .success();
+
+    // Advance both branches on the origin.
+    git(&src, &["checkout", "main"]);
+    fs::write(src.join("m2.txt"), "m2\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "-m", "origin main"]);
+    git(&src, &["checkout", "feat-a"]);
+    fs::write(src.join("f2.txt"), "f2\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "-m", "origin feat-a"]);
+    git(&src, &["checkout", "main"]);
+}
+
+#[test]
+fn pull_all_fast_forwards_all_behind_worktrees() {
+    let (tmp, wrapper) = create_gitree_repo();
+    setup_two_branch_wrapper(&tmp, &wrapper);
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["pull", "--all"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Fast-forwarding 'main' …"))
+        .stderr(predicate::str::contains("Fast-forwarding 'feat-a' …"))
+        .stderr(predicate::str::contains("Updated 2 worktree(s)."));
+
+    assert!(wrapper.join("main").join("m2.txt").exists());
+    assert!(wrapper.join("feat-a").join("f2.txt").exists());
+}
+
+#[test]
+fn pull_all_skips_dirty_worktree_without_autostash() {
+    let (tmp, wrapper) = create_gitree_repo();
+    setup_two_branch_wrapper(&tmp, &wrapper);
+
+    // Make the feature worktree dirty.
+    fs::write(wrapper.join("feat-a").join("feat.txt"), "dirty\n").unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["pull", "--all"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Fast-forwarding 'main' …"))
+        .stderr(predicate::str::contains("Skipped 'feat-a (1 change(s))'"))
+        .stderr(predicate::str::contains("dirty worktree"))
+        .stderr(predicate::str::contains("Updated 1 worktree(s)."));
+
+    assert!(wrapper.join("main").join("m2.txt").exists());
+    // The dirty worktree must be untouched.
+    assert!(!wrapper.join("feat-a").join("f2.txt").exists());
+    assert_eq!(
+        fs::read_to_string(wrapper.join("feat-a").join("feat.txt")).unwrap(),
+        "dirty\n"
+    );
+}
+
+#[test]
+fn pull_all_autostash_updates_dirty_worktree() {
+    let (tmp, wrapper) = create_gitree_repo();
+    setup_two_branch_wrapper(&tmp, &wrapper);
+
+    // Make the feature worktree dirty.
+    let feat_txt = wrapper.join("feat-a").join("feat.txt");
+    fs::write(&feat_txt, "dirty\n").unwrap();
+
+    // Autostash creates stash commits; the shared `.bare` config set by
+    // `create_gitree_repo` supplies the no-sign setting and identity for them.
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["pull", "--all", "--autostash"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Fast-forwarding 'main' …"))
+        .stderr(predicate::str::contains("Fast-forwarding 'feat-a' …"))
+        .stderr(predicate::str::contains("Updated 2 worktree(s)."));
+
+    assert!(wrapper.join("feat-a").join("f2.txt").exists());
+    // The modification must be preserved (autostash popped it back).
+    assert_eq!(fs::read_to_string(&feat_txt).unwrap(), "dirty\n");
+}
+
+#[test]
+fn pull_all_skips_diverged_worktree() {
+    let (tmp, wrapper) = create_gitree_repo();
+    setup_two_branch_wrapper(&tmp, &wrapper);
+
+    // Give the feature worktree a local commit so it is ahead of origin.
+    let feat_wt = wrapper.join("feat-a");
+    fs::write(feat_wt.join("local.txt"), "local\n").unwrap();
+    git(&feat_wt, &["add", "."]);
+    git(&feat_wt, &["commit", "-m", "local work"]);
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["pull", "--all"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Fast-forwarding 'main' …"))
+        .stderr(predicate::str::contains(
+            "Skipped 'feat-a' — ahead of origin, not fast-forwardable.",
+        ))
+        .stderr(predicate::str::contains("Updated 1 worktree(s)."));
+
+    assert!(wrapper.join("main").join("m2.txt").exists());
+    assert!(!wrapper.join("feat-a").join("f2.txt").exists());
+}
+
+#[test]
+fn pull_all_conflicts_with_branch() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["pull", "--all", "--branch", "main"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
 // ---------------------------------------------------------------------------
 // `gitree migrate`
 // ---------------------------------------------------------------------------

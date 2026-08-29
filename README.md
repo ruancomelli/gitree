@@ -119,7 +119,7 @@ cd main
 | `gitree switch <branch>` | `sw` | Print a `cd` command for `eval` |
 | `gitree where <branch>` | | Print the path of a worktree |
 | `gitree root` | | Print the wrapper root directory |
-| `gitree pull` | `pl` | Fetch and fast-forward main |
+| `gitree pull` | `pl` | Fetch and fast-forward main (all worktrees with `--all`) |
 | `gitree foreach <cmd>` | `fe` | Run a command in every worktree |
 | `gitree status` | `st` | Show status overview of all worktrees |
 | `gitree doctor` | `doc` | Health check for the wrapper |
@@ -200,12 +200,19 @@ directory-style name (`branch/`) or the worktree's path.
 
 Prints the wrapper root directory.
 
-### `gitree pull [--branch <name>] [--autostash]`
+### `gitree pull [--all] [--branch <name>] [--autostash]`
 
 Fetches from origin and fast-forwards the main worktree (or a specified
 branch's worktree) if it is clean. If the worktree is dirty, the error names
 the branch and path. Use `--autostash` to stash uncommitted changes before
 merging and pop them afterwards.
+
+With `--all`, every worktree that is behind its origin branch is
+fast-forwarded. Dirty worktrees are skipped (with a note) unless
+`--autostash` is given, which applies autostash per worktree. Worktrees that
+are ahead of or diverged from origin are skipped and reported; branches
+without an `origin/<branch>` upstream are ignored. `--all` cannot be
+combined with `--branch`.
 
 ### `gitree foreach <command> [--parallel] [--only <glob>]`
 

@@ -82,7 +82,7 @@ pub enum Commands {
     /// Print the wrapper root directory.
     Root,
 
-    /// Fetch and fast-forward the main worktree.
+    /// Fetch and fast-forward the main worktree (or all worktrees with `--all`).
     #[command(alias = "pl")]
     Pull(PullArgs),
 
@@ -238,6 +238,11 @@ pub struct WhereArgs {
 /// Arguments for `gitree pull`.
 #[derive(Args, Debug)]
 pub struct PullArgs {
+    /// Fast-forward every worktree that is behind its origin branch.
+    /// Dirty worktrees are skipped unless `--autostash` is given.
+    #[arg(long, conflicts_with = "branch")]
+    pub all: bool,
+
     /// Override the branch to fast-forward (default: main, fallback master).
     #[arg(long)]
     pub branch: Option<String>,

@@ -10,6 +10,12 @@ use crate::error::{GitreeError, Result};
 /// and wires up shell completions so that `<alias>` delegates to the
 /// `gitree` completion function installed via `gitree completion <shell>`.
 ///
+/// Switching is done by passing the destination *as data*: the dispatcher
+/// fetches the worktree path from `gitree where` and `cd`s to it. No
+/// shell code is ever evaluated, which avoids the escaping differences
+/// between shells (fish in particular cannot consume POSIX-quoted `cd`
+/// output).
+///
 /// # Errors
 ///
 /// Returns an error if the shell is not supported or writing fails.
@@ -33,17 +39,24 @@ pub fn run(shell: &str, alias: &str) -> Result<()> {
     Ok(())
 }
 
+/// Shell keywords and builtins that would break as function names.
+const RESERVED_ALIASES: &[&str] = &[
+    "cd", "gitree", "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done",
+    "case", "esac", "function", "select", "time", "coproc",
+];
+
 /// Validates that an alias name is a safe shell identifier.
 ///
 /// Allows alphanumeric and underscore characters, starting with a letter
-/// or underscore. This prevents injection of arbitrary shell commands
-/// through `--alias`.
+/// or underscore, and rejects reserved words and the builtins the
+/// generated functions rely on. This prevents injection of arbitrary
+/// shell commands through `--alias`.
 fn validate_alias(alias: &str) -> Result<()> {
     if alias.is_empty() {
         return Err(GitreeError::Other("alias name must not be empty".into()));
     }
     let mut chars = alias.chars();
-    let first = chars.next().expect("checked non-empty");
+    let first = chars.next().unwrap_or_default();
     if !(first.is_ascii_alphabetic() || first == '_') {
         return Err(GitreeError::Other(format!(
             "alias name must start with a letter or underscore: '{alias}'"
@@ -52,6 +65,11 @@ fn validate_alias(alias: &str) -> Result<()> {
     if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err(GitreeError::Other(format!(
             "alias name may only contain letters, digits, or underscores: '{alias}'"
+        )));
+    }
+    if RESERVED_ALIASES.contains(&alias) {
+        return Err(GitreeError::Other(format!(
+            "alias name '{alias}' is reserved — choose another name"
         )));
     }
     Ok(())
@@ -66,16 +84,29 @@ fn switch_alias(alias: &str) -> String {
 fn bash_zsh_core(alias: &str) -> String {
     let sw = switch_alias(alias);
     format!(
-        r#"# {alias}() — dispatcher: `{alias} sw <branch>` does native cd, everything
-# else passes through to gitree.
+        r#"# {alias}() — dispatcher: `{alias} sw <branch>` changes directory natively,
+# everything else passes through to gitree.
 {alias}() {{
-    if [[ "$1" == "sw" || "$1" == "switch" ]]; then
-        shift
-        local result
-        result=$(gitree switch "$@") && eval "$result"
-    else
-        gitree "$@"
-    fi
+    case "$1" in
+        sw|switch)
+            shift
+            case "${{1-}}" in
+                -*) gitree switch "$@"; return $? ;;
+            esac
+            # The destination is passed as data: `gitree where` prints the
+            # path, and `cd` receives it as a single argument. No shell
+            # code is ever evaluated.
+            local dest
+            if dest=$(gitree where "$@") && [[ -n "$dest" ]]; then
+                cd -- "$dest"
+                return $?
+            fi
+            return 1
+            ;;
+        *)
+            gitree "$@"
+            ;;
+    esac
 }}
 
 # {sw} — switch to a worktree (changes directory natively)
@@ -131,7 +162,7 @@ else
     _{alias}_defer_compdef() {{
         if command -v compdef >/dev/null 2>&1; then
             compdef _gitree {alias}
-            add-zsh-hook -d _{alias}_defer_compdef
+            add-zsh-hook -d precmd _{alias}_defer_compdef
         fi
     }}
     add-zsh-hook precmd _{alias}_defer_compdef
@@ -147,12 +178,29 @@ fn fish_script(alias: &str) -> String {
         r#"# gitree shell integration for fish
 # Usage: gitree env fish | source
 
-# {alias}() — dispatcher: `{alias} sw <branch>` does native cd, everything
-# else passes through to gitree.
+# {alias}() — dispatcher: `{alias} sw <branch>` changes directory natively,
+# everything else passes through to gitree.
 function {alias}
+    if test (count $argv) -eq 0
+        gitree
+        return $status
+    end
     switch $argv[1]
         case sw switch
-            gitree switch $argv[2..] | source
+            set -l args $argv[2..-1]
+            if test (count $args) -ge 1; and string match -q -- '-*' $args[1]
+                gitree switch $args
+                return $status
+            end
+            # The destination is passed as data: `gitree where` prints the
+            # path, `read` consumes it, and `cd` receives it as one
+            # argument. No shell code is ever evaluated (POSIX-quoted
+            # `cd` output is NOT safe to eval in fish).
+            if gitree where $args | read -l dest
+                cd $dest
+                return $status
+            end
+            return 1
         case '*'
             gitree $argv
     end
@@ -182,15 +230,23 @@ fn posix_script(alias: &str) -> String {
         r#"# gitree shell integration for POSIX shells
 # Usage: eval "$(gitree env posix)"
 
-# {alias}() — dispatcher: `{alias} sw <branch>` does native cd, everything
-# else passes through to gitree.
+# {alias}() — dispatcher: `{alias} sw <branch>` changes directory natively,
+# everything else passes through to gitree.
 {alias}() {{
-    if [ "$1" = "sw" ] || [ "$1" = "switch" ]; then
-        shift
-        result=$(gitree switch "$@") && eval "$result"
-    else
-        gitree "$@"
-    fi
+    case "$1" in
+        sw|switch)
+            shift
+            case "${{1-}}" in
+                -*) gitree switch "$@"; return $? ;;
+            esac
+            # The destination is passed as data; no shell code is evaluated.
+            dest=$(gitree where "$@") && [ -n "$dest" ] && cd "$dest" && return $?
+            return 1
+            ;;
+        *)
+            gitree "$@"
+            ;;
+    esac
 }}
 
 # {sw} — switch to a worktree (changes directory natively)
@@ -212,9 +268,12 @@ mod tests {
         let script = bash_script("gtr");
         assert!(script.contains("gtr()"));
         assert!(script.contains("gtrsw"));
-        assert!(script.contains("gitree switch"));
+        assert!(script.contains("dest=$(gitree where"));
+        assert!(script.contains("cd -- \"$dest\""));
         assert!(script.contains("complete -F _gtr_complete gtr"));
         assert!(script.contains("_gtr_complete"));
+        // No shell code is evaluated for switching.
+        assert!(!script.contains("eval \"$result\""));
     }
 
     #[test]
@@ -233,7 +292,7 @@ mod tests {
         assert!(script.contains("gtrsw"));
         assert!(script.contains("compdef _gitree gtr"));
         assert!(script.contains("add-zsh-hook precmd _gtr_defer_compdef"));
-        assert!(script.contains("add-zsh-hook -d _gtr_defer_compdef"));
+        assert!(script.contains("add-zsh-hook -d precmd _gtr_defer_compdef"));
     }
 
     #[test]
@@ -251,7 +310,11 @@ mod tests {
         assert!(script.contains("function gtr\n"));
         assert!(script.contains("function gtrsw --wraps='gitree switch'"));
         assert!(script.contains("gtr sw $argv"));
+        assert!(script.contains("gitree where $args | read -l dest"));
+        assert!(script.contains("cd $dest"));
         assert!(script.contains("complete --command gtr --wraps gitree"));
+        // No `source` of generated switch output.
+        assert!(!script.contains("gitree switch $argv[2..] | source"));
     }
 
     #[test]
@@ -268,6 +331,8 @@ mod tests {
         let script = posix_script("gtr");
         assert!(script.contains("gtr()"));
         assert!(script.contains("gtrsw"));
+        assert!(script.contains("dest=$(gitree where"));
+        assert!(!script.contains("eval \"$result\""));
     }
 
     #[test]
@@ -300,5 +365,13 @@ mod tests {
         assert!(validate_alias("gt-r").is_err());
         assert!(validate_alias("gt;rm").is_err());
         assert!(validate_alias("gt rm").is_err());
+    }
+
+    #[test]
+    fn validate_alias_rejects_reserved_names() {
+        assert!(validate_alias("cd").is_err());
+        assert!(validate_alias("gitree").is_err());
+        assert!(validate_alias("if").is_err());
+        assert!(validate_alias("done").is_err());
     }
 }

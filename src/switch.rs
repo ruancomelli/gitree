@@ -5,11 +5,15 @@ use std::io::Write;
 use crate::error::{GitreeError, Result};
 use crate::repo::Wrapper;
 
-/// Shell-escapes a path for use in a `cd '...'` command.
+/// Shell-escapes a path for use in a `cd '...'` command in POSIX-style
+/// shells (bash, zsh, dash).
 ///
 /// Replaces any single quote `'` with `'\''` (the standard POSIX escaping
-/// pattern) and wraps the entire string in single quotes.
-fn shell_escape(s: &str) -> String {
+/// pattern) and wraps the entire string in single quotes. This is *not*
+/// safe for fish, which treats backslash escapes inside single quotes
+/// differently — fish consumers must receive the destination as data (see
+/// `gitree env fish`, which `cd`s the path returned by `gitree where`).
+pub(crate) fn shell_escape(s: &str) -> String {
     let escaped = s.replace('\'', "'\\''");
     format!("'{escaped}'")
 }

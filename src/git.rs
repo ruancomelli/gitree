@@ -272,7 +272,8 @@ impl Git {
         // A quiet existence probe separates "no upstream" (below) from
         // genuine failures in the rev-list call; rev-list would otherwise
         // fail ambiguously for both cases.
-        let remote_ref = format!("origin/{branch}");
+        let remote_ref = format!("refs/remotes/origin/{branch}");
+        let local_ref = format!("refs/heads/{branch}");
         if self
             .run(&["rev-parse", "--verify", "--quiet", &remote_ref])
             .is_err()
@@ -284,7 +285,7 @@ impl Git {
             "rev-list",
             "--left-right",
             "--count",
-            &format!("{remote_ref}...{branch}"),
+            &format!("{remote_ref}...{local_ref}"),
         ])?;
         let mut parts = rev_list.split_whitespace();
         // Left side is `origin/<branch>`: commits we are behind; right side
@@ -448,17 +449,75 @@ impl Git {
     /// When `autostash` is `true`, passes `--autostash` so that uncommitted
     /// changes are stashed before the merge and popped afterwards.
     ///
+    /// `branch` names the branch being updated. Its
+    /// `branch.<name>.mergeOptions` config is explicitly cleared for this
+    /// invocation: an inherited `--squash` would otherwise let the merge
+    /// exit successfully while leaving HEAD untouched.
+    ///
+    /// The returned [`MergeResult`] carries the HEAD before/after and the
+    /// stderr captured on success, so callers can detect a fast-forward
+    /// whose autostash restoration conflicted (git exits zero in that case
+    /// while keeping the stash).
+    ///
     /// # Errors
     ///
     /// Returns an error if git fails.
-    pub fn merge_ff_only(&self, refspec: &str, autostash: bool) -> Result<()> {
-        let mut args: Vec<&str> = vec!["merge", "--ff-only"];
+    pub fn merge_ff_only(
+        &self,
+        branch: &str,
+        refspec: &str,
+        autostash: bool,
+    ) -> Result<MergeResult> {
+        let head_before = self.run_rev_parse_head().ok();
+        let mut args: Vec<String> = vec![
+            "-c".into(),
+            format!("branch.{branch}.mergeOptions="),
+            "merge".into(),
+            "--ff-only".into(),
+        ];
         if autostash {
-            args.push("--autostash");
+            args.push("--autostash".into());
         }
-        args.push(refspec);
-        self.run(&args)?;
-        Ok(())
+        args.push(refspec.into());
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = self.exec(&arg_refs, &[])?;
+        if !output.status.success() {
+            return Err(GitreeError::GitFailed {
+                summary: format!("git merge --ff-only {refspec}"),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            });
+        }
+        let head_after = self.run_rev_parse_head().ok();
+        Ok(MergeResult {
+            head_before,
+            head_after,
+            notes: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        })
+    }
+
+    /// Returns `true` if the worktree's HEAD is a symbolic ref to
+    /// `branch`, re-read from the worktree itself.
+    ///
+    /// Used to revalidate a worktree identity immediately before a
+    /// mutating operation: the entry from an earlier `worktree_list()`
+    /// snapshot may be stale if the user switched branches meanwhile.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git fails.
+    pub fn current_branch(&self) -> Result<Option<String>> {
+        let output = self.exec(&["symbolic-ref", "--short", "-q", "HEAD"], &[])?;
+        match output.status.code() {
+            Some(0) => Ok(Some(
+                String::from_utf8_lossy(&output.stdout).trim().to_string(),
+            )),
+            // Exit 1 with empty output is the detached-HEAD convention.
+            Some(1) => Ok(None),
+            _ => Err(GitreeError::GitFailed {
+                summary: "git symbolic-ref --short -q HEAD".into(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            }),
+        }
     }
 
     /// Sets a git config value.
@@ -572,6 +631,19 @@ pub struct BranchSet {
     pub local: Vec<String>,
     /// Remote-tracking branches from `origin` (without the `origin/` prefix).
     pub remote: Vec<String>,
+}
+
+/// The outcome of a successful `git merge --ff-only`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MergeResult {
+    /// HEAD before the merge, when it could be resolved.
+    pub head_before: Option<String>,
+    /// HEAD after the merge, when it could be resolved.
+    pub head_after: Option<String>,
+    /// stderr captured from a *successful* merge. Git reports autostash
+    /// restoration conflicts on stderr while still exiting zero, so
+    /// callers must inspect this instead of trusting the exit status.
+    pub notes: String,
 }
 
 /// The upstream tracking state of a local branch.

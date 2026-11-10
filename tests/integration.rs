@@ -1299,6 +1299,7 @@ fn clean_aborts_when_fetch_fails() {
 #[test]
 fn pull_dirty_worktree_names_branch_and_suggests_autostash() {
     let (_tmp, wrapper) = create_gitree_repo();
+    let src = _tmp.path().join("source.git");
 
     AssertCommand::cargo_bin("gitree")
         .unwrap()
@@ -1306,6 +1307,11 @@ fn pull_dirty_worktree_names_branch_and_suggests_autostash() {
         .args(["add", "main"])
         .assert()
         .success();
+
+    // Advance origin so there is something to pull.
+    fs::write(src.join("new-file.txt"), "new\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "-m", "second"]);
 
     // Modify a tracked file to make the worktree dirty.
     fs::write(wrapper.join("main").join("README.md"), "modified\n").unwrap();
@@ -2312,5 +2318,107 @@ fn clean_deletes_upstream_gone_branch() {
 
 // ---------------------------------------------------------------------------
 // `gitree pull` — truthful outcomes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pull_reports_autostash_conflict() {
+    let (_tmp, wrapper) = create_gitree_repo();
+    let src = _tmp.path().join("source.git");
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    // Origin changes README.md.
+    fs::write(src.join("README.md"), "origin version\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "-m", "origin change"]);
+
+    // The worktree changes the same lines: the autostash will conflict.
+    fs::write(wrapper.join("main").join("README.md"), "local version\n").unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["pull", "--autostash"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("resulted in conflicts"));
+
+    // Git keeps the stash on conflicted autostash restoration; gitree
+    // must not report success.
+    let stashes = git(&wrapper.join("main"), &["stash", "list"]);
+    assert!(!stashes.is_empty(), "the conflicted autostash must be kept");
+}
+
+#[test]
+fn pull_neutralizes_inherited_squash_options() {
+    let (_tmp, wrapper) = create_gitree_repo();
+    let src = _tmp.path().join("source.git");
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    fs::write(src.join("new-file.txt"), "new\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "-m", "second"]);
+
+    // An inherited --squash would let `merge --ff-only` exit successfully
+    // without moving HEAD; gitree must neutralize it per invocation.
+    git(
+        &wrapper,
+        &["config", "branch.main.mergeOptions", "--squash"],
+    );
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["pull"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Fast-forwarding"));
+
+    let branch_tip = git(&wrapper.join(".bare"), &["rev-parse", "main"]);
+    let origin_tip = git(&src, &["rev-parse", "main"]);
+    assert_eq!(
+        branch_tip, origin_tip,
+        "HEAD must advance on a fast-forward even with mergeOptions=--squash"
+    );
+}
+
+#[test]
+fn pull_single_diverged_fails() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    // Local commit puts the worktree ahead of origin.
+    fs::write(wrapper.join("main").join("local.txt"), "local\n").unwrap();
+    git(&wrapper.join("main"), &["add", "."]);
+    git(&wrapper.join("main"), &["commit", "-m", "local work"]);
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["pull"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("ahead of origin"));
+}
+
+// ---------------------------------------------------------------------------
+// Upstream tracking setup
 // ---------------------------------------------------------------------------
 

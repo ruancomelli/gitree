@@ -621,16 +621,18 @@ fn add_fails_for_nonexistent_branch_without_new() {
 }
 
 #[test]
-fn switch_rejects_invalid_branch_names() {
+fn switch_rejects_unknown_worktrees() {
     let (_tmp, wrapper) = create_gitree_repo();
 
+    // Nothing outside the wrapper is a worktree: traversal-style and
+    // arbitrary paths must never resolve.
     AssertCommand::cargo_bin("gitree")
         .unwrap()
         .current_dir(&wrapper)
         .args(["switch", "../escape"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("branch name"));
+        .stderr(predicate::str::contains("no worktree found"));
 
     AssertCommand::cargo_bin("gitree")
         .unwrap()
@@ -638,11 +640,11 @@ fn switch_rejects_invalid_branch_names() {
         .args(["switch", "foo bar"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("branch name"));
+        .stderr(predicate::str::contains("no worktree found"));
 }
 
 #[test]
-fn where_rejects_invalid_branch_names() {
+fn where_rejects_unknown_worktrees() {
     let (_tmp, wrapper) = create_gitree_repo();
 
     AssertCommand::cargo_bin("gitree")
@@ -651,19 +653,21 @@ fn where_rejects_invalid_branch_names() {
         .args(["where", ".."])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("branch name"));
+        .stderr(predicate::str::contains("no worktree found"));
 
+    // Absolute paths are only matched against registered worktrees —
+    // never accepted as branch names.
     AssertCommand::cargo_bin("gitree")
         .unwrap()
         .current_dir(&wrapper)
-        .args(["where", "foo/../bar"])
+        .args(["where", "/etc"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("branch name"));
+        .stderr(predicate::str::contains("no worktree found"));
 }
 
 #[test]
-fn remove_rejects_invalid_branch_names() {
+fn remove_rejects_unknown_worktrees() {
     let (_tmp, wrapper) = create_gitree_repo();
 
     AssertCommand::cargo_bin("gitree")
@@ -672,7 +676,7 @@ fn remove_rejects_invalid_branch_names() {
         .args(["remove", "../escape"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("branch name"));
+        .stderr(predicate::str::contains("no worktree found"));
 
     AssertCommand::cargo_bin("gitree")
         .unwrap()
@@ -680,7 +684,7 @@ fn remove_rejects_invalid_branch_names() {
         .args(["rm", "branch.lock"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("branch name"));
+        .stderr(predicate::str::contains("no worktree found"));
 }
 
 #[test]
@@ -791,7 +795,7 @@ fn remove_rejects_traversal_with_trailing_slash() {
         .args(["rm", "../escape/"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("branch name"));
+        .stderr(predicate::str::contains("no worktree found"));
 }
 
 #[test]
@@ -2778,4 +2782,56 @@ fn foreach_parallel_reports_failures() {
 // ---------------------------------------------------------------------------
 // Registered-worktree identity (branch/dir decoupling)
 // ---------------------------------------------------------------------------
+
+#[test]
+fn remove_targets_registered_worktree_when_branch_moved() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "topic", "--new"])
+        .assert()
+        .success();
+
+    // Ordinary git: switch branches between the worktrees, so branch
+    // `topic` now lives in main/ and branch `spare` in topic/.
+    git(&wrapper.join("topic"), &["switch", "-c", "spare"]);
+    git(&wrapper.join("main"), &["switch", "topic"]);
+
+    // `where` must report the registered path, not the branch-derived one.
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["where", "topic"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            wrapper.join("main").to_str().unwrap(),
+        ));
+
+    // `remove topic` must remove the checkout holding branch `topic`
+    // (main/), not the directory coincidentally named `topic`.
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["remove", "topic"])
+        .assert()
+        .success();
+
+    assert!(
+        !wrapper.join("main").exists(),
+        "the worktree holding branch 'topic' must be removed"
+    );
+    assert!(
+        wrapper.join("topic").exists(),
+        "the worktree holding branch 'spare' must survive"
+    );
+}
 

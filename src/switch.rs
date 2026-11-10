@@ -2,7 +2,7 @@
 
 use std::io::Write;
 
-use crate::error::{GitreeError, Result};
+use crate::error::Result;
 use crate::repo::Wrapper;
 
 /// Shell-escapes a path for use in a `cd '...'` command in POSIX-style
@@ -21,19 +21,16 @@ pub(crate) fn shell_escape(s: &str) -> String {
 /// Runs the `switch` command — prints a `cd` command for `eval`.
 ///
 /// Accepts plain branch names, directory-style names (`branch/`), and
-/// worktree paths.  The path is single-quote-escaped to handle paths
-/// containing spaces, quotes, or dollar signs safely.
+/// worktree paths.  The path is the one git registers for the worktree,
+/// single-quote-escaped to handle paths containing spaces, quotes, or
+/// dollar signs safely.
 ///
 /// # Errors
 ///
 /// Returns an error if no worktree exists for the branch.
 pub fn run_switch(wrapper: &Wrapper, branch: &str) -> Result<()> {
-    let branch = wrapper.resolve_branch_arg(branch)?;
-    let path = wrapper.worktree_path(branch.as_str());
-    if !path.as_path().exists() {
-        return Err(GitreeError::PathMissing(path.into_pathbuf()));
-    }
-    let escaped = shell_escape(&path.as_path().display().to_string());
+    let entry = wrapper.resolve_worktree(branch)?;
+    let escaped = shell_escape(&entry.path.display().to_string());
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     writeln!(out, "cd {escaped}")?;
@@ -41,10 +38,15 @@ pub fn run_switch(wrapper: &Wrapper, branch: &str) -> Result<()> {
 }
 
 /// Runs the `root` command — prints the wrapper root path.
-pub fn run_root(wrapper: &Wrapper) {
+///
+/// # Errors
+///
+/// Returns an error if writing to stdout fails.
+pub fn run_root(wrapper: &Wrapper) -> Result<()> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    let _ = writeln!(out, "{}", wrapper.path().display());
+    writeln!(out, "{}", wrapper.path().display())?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

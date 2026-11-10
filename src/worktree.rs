@@ -219,20 +219,26 @@ pub fn run_remove(wrapper: &Wrapper, opts: RemoveOptions) -> Result<()> {
 }
 
 fn remove_one(wrapper: &Wrapper, branch: &str, opts: &RemoveOptions) -> Result<()> {
-    let branch = wrapper.resolve_branch_arg(branch)?;
-    let worktree_path = wrapper.worktree_path(branch.as_str());
+    // Resolve against git's registry: a branch can be checked out in a
+    // directory whose name does not match it, so the registered path —
+    // not a path reconstructed from the branch name — is what gets
+    // removed.
+    let entry = wrapper.resolve_worktree(branch)?;
 
-    if !worktree_path.as_path().exists() {
-        return Err(GitreeError::PathMissing(worktree_path.into_pathbuf()));
-    }
-
-    eprintln!("Removing worktree: {}", worktree_path.as_path().display());
+    eprintln!("Removing worktree: {}", entry.path.display());
     let git = wrapper.git();
-    git.worktree_remove(worktree_path.as_path(), opts.force)?;
+    git.worktree_remove(entry.path.as_path(), opts.force)?;
 
     if opts.delete_branch {
-        eprintln!("Deleting branch '{branch}' …");
-        git.branch_delete(branch.as_str(), opts.force)?;
+        match &entry.branch {
+            Some(name) => {
+                eprintln!("Deleting branch '{name}' …");
+                git.branch_delete(name, opts.force)?;
+            }
+            None => {
+                eprintln!("warning: worktree has a detached HEAD — no branch to delete");
+            }
+        }
     }
 
     Ok(())
@@ -345,18 +351,17 @@ pub fn run_prune(wrapper: &Wrapper) -> Result<()> {
 /// branch.
 ///
 /// Accepts plain branch names, directory-style names (`branch/`), and
-/// worktree paths.
+/// worktree paths.  The path git registers for the worktree is printed,
+/// even when the branch was switched into a differently named directory.
 ///
 /// # Errors
 ///
 /// Returns an error if no worktree exists for the branch.
 pub fn run_where(wrapper: &Wrapper, branch: &str) -> Result<()> {
-    let branch = wrapper.resolve_branch_arg(branch)?;
-    let path = wrapper.worktree_path(branch.as_str());
-    if !path.as_path().exists() {
-        return Err(GitreeError::PathMissing(path.into_pathbuf()));
-    }
-    println!("{}", path.as_path().display());
+    let entry = wrapper.resolve_worktree(branch)?;
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    writeln!(out, "{}", entry.path.display())?;
     Ok(())
 }
 

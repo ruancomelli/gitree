@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::{GitreeError, Result};
-use crate::git::Git;
+use crate::git::{Git, WorktreeEntry};
 use crate::types::{BareDir, BranchName, SharedDir, WorktreePath};
 
 /// The wrapper root directory.
@@ -143,59 +143,58 @@ impl Wrapper {
         Git::new(path)
     }
 
-    /// Resolves a user-supplied branch argument to a [`BranchName`].
+    /// Resolves a user-supplied argument to an actual registered worktree.
     ///
     /// Accepts plain branch names, directory-style names (`branch/`,
     /// `./branch/`), and worktree paths, relative or absolute.  Trailing
     /// slashes are common because shells tab-complete worktree directories.
     ///
-    /// The fast path validates the trimmed argument as a branch name, which
-    /// works from any working directory.  As a fallback the argument is
-    /// resolved as a filesystem path and matched against the worktrees git
-    /// reports, so only real worktree branches can come back from it.
+    /// The returned entry carries the branch and path *git* reports for the
+    /// worktree, so callers must act on those values rather than
+    /// reconstructing a path from the branch name: ordinary git operations
+    /// can move worktrees or change which branch a directory holds, and
+    /// branch names are not durable worktree identities.
     ///
     /// # Errors
     ///
-    /// Returns the [`BranchName`] validation error when the argument is
-    /// neither a valid branch name nor the path of an existing worktree.
-    pub fn resolve_branch_arg(&self, raw: &str) -> Result<BranchName> {
+    /// Returns [`GitreeError::WorktreeNotFound`] when neither a branch
+    /// match nor a path match identifies a registered worktree. Absolute
+    /// paths are only ever matched against registered worktrees, never
+    /// accepted as branch names.
+    pub fn resolve_worktree(&self, raw: &str) -> Result<WorktreeEntry> {
         let trimmed = raw.trim_end_matches('/');
+        let worktrees = self.git().worktree_list()?;
+
         if !trimmed.starts_with('/')
             && let Ok(branch) = BranchName::new(trimmed)
+            && let Some(entry) = worktrees
+                .iter()
+                .find(|wt| wt.branch.as_deref() == Some(branch.as_str()))
         {
-            return Ok(branch);
+            return Ok(entry.clone());
         }
-        if !trimmed.is_empty()
-            && let Some(branch) = self.branch_at_path(raw)
-        {
-            return Ok(branch);
-        }
-        BranchName::new(trimmed)
-    }
 
-    /// Returns the branch of the worktree at `raw` (relative to CWD or
-    /// absolute), or `None` when no worktree matches.
-    fn branch_at_path(&self, raw: &str) -> Option<BranchName> {
-        let candidate = PathBuf::from(raw);
-        let candidate = if candidate.is_absolute() {
-            candidate
-        } else {
-            std::env::current_dir().ok()?.join(candidate)
-        };
-        let resolved = candidate.canonicalize().unwrap_or(candidate);
+        if !trimmed.is_empty() {
+            let candidate = PathBuf::from(raw);
+            let candidate = if candidate.is_absolute() {
+                candidate
+            } else {
+                std::env::current_dir()?.join(candidate)
+            };
+            let resolved = candidate.canonicalize().unwrap_or(candidate);
 
-        self.git()
-            .worktree_list()
-            .ok()?
-            .into_iter()
-            .find_map(|entry| {
-                let path = entry.path.canonicalize().unwrap_or(entry.path);
-                if path != resolved {
-                    return None;
+            for entry in &worktrees {
+                let path = entry
+                    .path
+                    .canonicalize()
+                    .unwrap_or_else(|_| entry.path.clone());
+                if path == resolved {
+                    return Ok(entry.clone());
                 }
-                let branch = entry.branch?;
-                BranchName::new(&branch).ok()
-            })
+            }
+        }
+
+        Err(GitreeError::WorktreeNotFound(raw.to_string()))
     }
 
     /// Returns `true` if `.shared/` exists.
@@ -378,44 +377,68 @@ mod tests {
     }
 
     #[test]
-    fn resolve_branch_arg_accepts_trailing_slash() {
+    fn resolve_worktree_accepts_trailing_slash() {
         let tmp = TempDir::new().unwrap();
         let wrapper = wrapper_with_worktrees(tmp.path());
-        assert_eq!(
-            wrapper.resolve_branch_arg("main/").unwrap().as_str(),
-            "main"
-        );
+        let wt = wrapper.resolve_worktree("main/").unwrap();
+        assert_eq!(wt.branch.as_deref(), Some("main"));
     }
 
     #[test]
-    fn resolve_branch_arg_resolves_worktree_path() {
+    fn resolve_worktree_resolves_absolute_path() {
         let tmp = TempDir::new().unwrap();
         let wrapper = wrapper_with_worktrees(tmp.path());
         let abs = wrapper.path().join("main").display().to_string();
-        assert_eq!(wrapper.resolve_branch_arg(&abs).unwrap().as_str(), "main");
+        let wt = wrapper.resolve_worktree(&abs).unwrap();
+        assert_eq!(wt.branch.as_deref(), Some("main"));
     }
 
     #[test]
-    fn resolve_branch_arg_resolves_nested_worktree_path() {
+    fn resolve_worktree_resolves_nested_worktree_path() {
         let tmp = TempDir::new().unwrap();
         let wrapper = wrapper_with_worktrees(tmp.path());
         let nested = wrapper.path().join("feature/test").display().to_string();
-        assert_eq!(
-            wrapper.resolve_branch_arg(&nested).unwrap().as_str(),
-            "feature/test"
-        );
+        let wt = wrapper.resolve_worktree(&nested).unwrap();
+        assert_eq!(wt.branch.as_deref(), Some("feature/test"));
     }
 
     #[test]
-    fn resolve_branch_arg_errors_for_invalid_names() {
+    fn resolve_worktree_rejects_unknown_args() {
         let tmp = TempDir::new().unwrap();
         let wrapper = wrapper_with_worktrees(tmp.path());
-        for bad in ["../escape/", "branch.lock/", ""] {
-            let err = wrapper.resolve_branch_arg(bad).expect_err("must fail");
+        for bad in ["../escape/", "", "/etc", "nonexistent-branch", "."] {
+            let err = wrapper.resolve_worktree(bad).expect_err("must fail");
             assert!(
-                err.to_string().contains("branch name"),
+                matches!(err, GitreeError::WorktreeNotFound(_)),
                 "unexpected error for {bad}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn resolve_worktree_matches_registered_path_not_branch_derived_path() {
+        // Ordinary git can leave a branch checked out in a directory that
+        // does not match its name. Resolution must return the registered
+        // entry, not a path reconstructed from the branch name.
+        let tmp = TempDir::new().unwrap();
+        let wrapper = wrapper_with_worktrees(tmp.path());
+
+        // Re-point the `feature/test` worktree at branch `main`... blocked
+        // (main is checked out elsewhere), so instead re-point `main`'s
+        // worktree at a new branch and delete+recreate a worktree whose
+        // directory no longer matches its branch.
+        run_git(
+            &wrapper.path().join("feature/test"),
+            &["switch", "-c", "spare"],
+        );
+        run_git(&wrapper.path().join("main"), &["switch", "feature/test"]);
+
+        // Branch `feature/test` now lives in `main/`, branch `spare` in
+        // `feature/test/`. Resolving by branch must yield the registered
+        // path, not `<wrapper>/feature/test`.
+        let wt = wrapper.resolve_worktree("feature/test").unwrap();
+        assert_eq!(wt.path, wrapper.path().join("main"));
+        let wt = wrapper.resolve_worktree("spare").unwrap();
+        assert_eq!(wt.path, wrapper.path().join("feature/test"));
     }
 }

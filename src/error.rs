@@ -36,10 +36,6 @@ pub enum GitreeError {
     #[error("git executable not found on PATH")]
     GitNotFound,
 
-    /// A path that was expected to exist does not.
-    #[error("path does not exist: {0}")]
-    PathMissing(PathBuf),
-
     /// A path that was expected to be absent already exists.
     #[error("path already exists: {0}")]
     PathExists(PathBuf),
@@ -47,6 +43,10 @@ pub enum GitreeError {
     /// A worktree for the given branch already exists.
     #[error("a worktree for branch '{0}' already exists")]
     WorktreeExists(String),
+
+    /// No registered worktree matches the given branch or path argument.
+    #[error("no worktree found for '{0}'")]
+    WorktreeNotFound(String),
 
     /// The branch was not found locally or on any remote.
     #[error("branch '{0}' not found locally or on any remote")]

@@ -42,18 +42,26 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e:#}");
-            if let Some(source) = e
-                .source()
-                .and_then(|s| s.downcast_ref::<error::GitreeError>())
+            if let Some(source) = root_gitree_error(&e)
                 && let Some(hint) = hint_for(source)
             {
                 eprintln!("hint: {hint}");
             }
-            e.source()
-                .and_then(|s| s.downcast_ref::<error::GitreeError>())
-                .map_or(ExitCode::from(1), error::GitreeError::exit_code)
+            root_gitree_error(&e).map_or(ExitCode::from(1), error::GitreeError::exit_code)
         }
     }
+}
+
+/// Returns the root [`error::GitreeError`] from an [`anyhow::Error`],
+/// searching the whole chain.
+///
+/// Some failures (e.g. wrapper discovery) surface as a top-level
+/// `GitreeError` with no source at all, so only looking at `source()`
+/// would lose the typed exit code and hint.
+fn root_gitree_error(e: &anyhow::Error) -> Option<&error::GitreeError> {
+    e.chain()
+        .filter_map(|cause| cause.downcast_ref::<error::GitreeError>())
+        .next()
 }
 
 fn run(cli: Cli) -> anyhow::Result<()> {
@@ -136,7 +144,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Commands::Root => {
             let wrapper = repo::Wrapper::discover()?;
-            switch::run_root(&wrapper);
+            switch::run_root(&wrapper).context("failed to print wrapper root")?;
         }
         Commands::Pull(args) => {
             let wrapper = repo::Wrapper::discover()?;
@@ -188,6 +196,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 }
 
 /// Returns a helpful hint for specific error types.
+///
+/// Branch names and paths embedded in suggested commands are
+/// shell-quoted: git-valid names are not necessarily shell-safe
+/// arguments, and an unquoted `topic$(id)` would execute on paste.
 fn hint_for(err: &error::GitreeError) -> Option<String> {
     use error::{DirtyEscape, GitreeError};
     match err {
@@ -197,11 +209,13 @@ fn hint_for(err: &error::GitreeError) -> Option<String> {
                 .into(),
         ),
         GitreeError::BranchNotFound(name) => Some(format!(
-            "to create a new branch, run: gitree add {name} --new"
+            "to create a new branch, run: gitree add {} --new",
+            switch::shell_escape(name)
         )),
-        GitreeError::WorktreeExists(name) => {
-            Some(format!("to switch to it: eval \"$(gitree switch {name})\""))
-        }
+        GitreeError::WorktreeExists(name) => Some(format!(
+            "to switch to it: eval \"$(gitree switch {})\"",
+            switch::shell_escape(name)
+        )),
         GitreeError::DirtyWorktree {
             branch,
             path,

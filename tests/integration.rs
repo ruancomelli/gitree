@@ -2835,3 +2835,42 @@ fn remove_targets_registered_worktree_when_branch_moved() {
     );
 }
 
+#[test]
+fn status_reports_error_row_for_missing_worktree() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    // Delete the worktree directory; the stale registration remains.
+    fs::remove_dir_all(wrapper.join("main")).unwrap();
+
+    let output = AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["status", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let main_row = parsed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v.get("branch").and_then(|b| b.as_str()) == Some("main"))
+        .expect("main row must exist")
+        .clone();
+
+    // A row whose inspection failed must not masquerade as clean.
+    assert!(
+        main_row.get("error").and_then(|e| e.as_str()).is_some(),
+        "expected an error annotation for the missing worktree: {main_row}"
+    );
+}

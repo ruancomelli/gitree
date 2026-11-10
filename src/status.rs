@@ -43,20 +43,36 @@ pub struct StatusRow {
     pub ahead: usize,
     /// Commits behind origin.
     pub behind: usize,
+    /// Why the counts could not be determined, if applicable. A row with
+    /// an error is *not* known to be clean and synchronized — the counts
+    /// are placeholders.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// The live counts and any inspection failure for a single worktree.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorktreeCounts {
+    /// Number of uncommitted changes.
+    pub dirty: usize,
+    /// Commits ahead of origin.
+    pub ahead: usize,
+    /// Commits behind origin.
+    pub behind: usize,
+    /// Why the counts could not be determined, if applicable.
+    pub error: Option<String>,
 }
 
 impl StatusRow {
     /// Builds a [`StatusRow`] from a [`WorktreeEntry`].
     ///
     /// `path`, `cwd`, and `home` control how the worktree filesystem path is
-    /// rendered (see [`PathPolicy::format`]). `dirty`, `ahead`, and `behind`
-    /// are the worktree's change counts relative to its upstream.
+    /// rendered (see [`PathPolicy::format`]). `counts` carries the worktree's
+    /// change counts relative to its upstream and any inspection failure.
     #[must_use]
     pub fn from_entry(
         entry: &WorktreeEntry,
-        dirty: usize,
-        ahead: usize,
-        behind: usize,
+        counts: WorktreeCounts,
         path: PathPolicy,
         cwd: &Path,
         home: Option<&Path>,
@@ -64,9 +80,10 @@ impl StatusRow {
         Self {
             branch: entry.branch.clone().unwrap_or_else(|| "(detached)".into()),
             path_str: path.format(&entry.path, cwd, home),
-            dirty,
-            ahead,
-            behind,
+            dirty: counts.dirty,
+            ahead: counts.ahead,
+            behind: counts.behind,
+            error: counts.error,
         }
     }
 }
@@ -90,15 +107,46 @@ pub fn run(wrapper: &Wrapper, opts: StatusOptions) -> Result<()> {
         .map(|e| {
             let wt_git = wrapper.git_for(e.path.as_path());
             let branch = e.branch.clone().unwrap_or_else(|| "(detached)".into());
-            let dirty = wt_git.dirty_count().unwrap_or(0);
-            // Individual worktrees may be unreadable (locked, corrupt) or
-            // have no upstream; the overview degrades to zeros rather than
-            // failing wholesale.
-            let (ahead, behind) = match wt_git.ahead_behind(&branch) {
-                Ok(Some(counts)) => counts,
-                _ => (0, 0),
+            let mut error: Option<String> = None;
+
+            // Individual worktrees may be unreadable (missing directory,
+            // corrupt index) — the overview degrades per row instead of
+            // failing wholesale, but the failure is reported.
+            let dirty = match wt_git.dirty_count() {
+                Ok(count) => count,
+                Err(err) => {
+                    error = Some(format!("could not inspect worktree: {err}"));
+                    0
+                }
             };
-            StatusRow::from_entry(e, dirty, ahead, behind, opts.path, &cwd, home_ref)
+
+            // No upstream on origin is a normal state, not an error: the
+            // counts stay zero without an error annotation.
+            let (ahead, behind) = if error.is_some() {
+                (0, 0)
+            } else {
+                match wt_git.ahead_behind(&branch) {
+                    Ok(Some(counts)) => counts,
+                    Ok(None) => (0, 0),
+                    Err(err) => {
+                        error = Some(format!("could not compare with origin: {err}"));
+                        (0, 0)
+                    }
+                }
+            };
+
+            StatusRow::from_entry(
+                e,
+                WorktreeCounts {
+                    dirty,
+                    ahead,
+                    behind,
+                    error,
+                },
+                opts.path,
+                &cwd,
+                home_ref,
+            )
         })
         .collect();
 
@@ -109,14 +157,22 @@ pub fn run(wrapper: &Wrapper, opts: StatusOptions) -> Result<()> {
         render_json(&rows, &mut out)?;
     } else {
         let use_color = opts.color.should_color(std::io::stdout().is_terminal());
-        render_text(&rows, use_color, &mut out);
+        render_text(&rows, use_color, &mut out)?;
     }
 
     Ok(())
 }
 
 /// Renders the status overview as plain text (Git-style).
-pub fn render_text(rows: &[StatusRow], use_color: bool, out: &mut impl Write) {
+///
+/// # Errors
+///
+/// Returns an error if writing to the output fails.
+pub fn render_text(
+    rows: &[StatusRow],
+    use_color: bool,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
     for row in rows {
         let changes = (row.dirty > 0).then(|| {
             let plural = if row.dirty == 1 { "" } else { "s" };
@@ -124,6 +180,7 @@ pub fn render_text(rows: &[StatusRow], use_color: bool, out: &mut impl Write) {
         });
         let offsets =
             (row.ahead > 0 || row.behind > 0).then(|| format!(" ↑{}↓{}", row.ahead, row.behind));
+        let error = row.error.as_ref().map(|e| format!(" (error: {e})"));
 
         let paint = |code: &str, part: Option<String>| match part {
             Some(s) if use_color => format!("\x1b[{code}m{s}\x1b[0m"),
@@ -131,15 +188,17 @@ pub fn render_text(rows: &[StatusRow], use_color: bool, out: &mut impl Write) {
             None => String::new(),
         };
 
-        let _ = writeln!(
+        writeln!(
             out,
-            "{:<30} {}{}{}",
+            "{:<30} {}{}{}{}",
             row.branch,
             row.path_str,
             paint("33", changes),
             paint("36", offsets),
-        );
+            paint("31", error),
+        )?;
     }
+    Ok(())
 }
 
 /// Renders the status overview as JSON.
@@ -172,9 +231,12 @@ mod tests {
         let entry = sample_entry();
         let row = StatusRow::from_entry(
             &entry,
-            2,
-            0,
-            4,
+            WorktreeCounts {
+                dirty: 2,
+                ahead: 0,
+                behind: 4,
+                error: None,
+            },
             PathPolicy::Relative,
             Path::new("/home/user/project"),
             None,
@@ -191,9 +253,7 @@ mod tests {
         let entry = sample_entry();
         let row = StatusRow::from_entry(
             &entry,
-            0,
-            0,
-            0,
+            WorktreeCounts::default(),
             PathPolicy::Absolute,
             Path::new("/tmp"),
             None,
@@ -206,9 +266,7 @@ mod tests {
         let entry = sample_entry();
         let row = StatusRow::from_entry(
             &entry,
-            0,
-            0,
-            0,
+            WorktreeCounts::default(),
             PathPolicy::Abbreviated,
             Path::new("/tmp"),
             Some(Path::new("/home/user")),
@@ -228,9 +286,7 @@ mod tests {
         };
         let row = StatusRow::from_entry(
             &entry,
-            0,
-            0,
-            0,
+            WorktreeCounts::default(),
             PathPolicy::Absolute,
             Path::new("/tmp"),
             None,
@@ -246,9 +302,10 @@ mod tests {
             dirty: 0,
             ahead: 0,
             behind: 0,
+            error: None,
         }];
         let mut buf = Vec::new();
-        render_text(&rows, false, &mut buf);
+        render_text(&rows, false, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("main"));
         assert!(!output.contains("change"));
@@ -263,9 +320,10 @@ mod tests {
             dirty: 3,
             ahead: 1,
             behind: 2,
+            error: None,
         }];
         let mut buf = Vec::new();
-        render_text(&rows, false, &mut buf);
+        render_text(&rows, false, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("(3 changes)"));
         assert!(output.contains("↑1↓2"));
@@ -279,9 +337,10 @@ mod tests {
             dirty: 1,
             ahead: 1,
             behind: 0,
+            error: None,
         }];
         let mut buf = Vec::new();
-        render_text(&rows, true, &mut buf);
+        render_text(&rows, true, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("\x1b[33m"));
         assert!(output.contains("\x1b[36m"));
@@ -295,6 +354,7 @@ mod tests {
             dirty: 1,
             ahead: 2,
             behind: 3,
+            error: None,
         }];
         let mut buf = Vec::new();
         render_json(&rows, &mut buf).unwrap();
@@ -304,5 +364,48 @@ mod tests {
         assert_eq!(parsed[0].dirty, 1);
         assert_eq!(parsed[0].ahead, 2);
         assert_eq!(parsed[0].behind, 3);
+    }
+
+    #[test]
+    fn render_text_shows_error_row() {
+        let rows = vec![StatusRow {
+            branch: "main".into(),
+            path_str: "main".into(),
+            dirty: 0,
+            ahead: 0,
+            behind: 0,
+            error: Some("could not inspect worktree: boom".into()),
+        }];
+        let mut buf = Vec::new();
+        render_text(&rows, false, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("(error: could not inspect worktree: boom)"));
+    }
+
+    #[test]
+    fn render_json_omits_absent_error() {
+        let rows = vec![
+            StatusRow {
+                branch: "main".into(),
+                path_str: "main".into(),
+                dirty: 0,
+                ahead: 0,
+                behind: 0,
+                error: None,
+            },
+            StatusRow {
+                branch: "broken".into(),
+                path_str: "broken".into(),
+                dirty: 0,
+                ahead: 0,
+                behind: 0,
+                error: Some("boom".into()),
+            },
+        ];
+        let mut buf = Vec::new();
+        render_json(&rows, &mut buf).unwrap();
+        let output = String::from_utf8(buf).unwrap();
+        assert!(!output.contains("\"error\": null"));
+        assert!(output.contains("\"error\": \"boom\""));
     }
 }

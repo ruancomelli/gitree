@@ -101,10 +101,17 @@ cd main
 
 ```sh
 cd my-project          # your existing regular clone
-gitree migrate         # careful pre-flight checks, then atomic conversion
-gitree add main
+gitree migrate         # careful pre-flight checks, then conversion
 cd main
 ```
+
+The pre-flight rejects states it cannot preserve — initialized submodules,
+split-index mode, `extensions.worktreeConfig`, in-progress operations
+(merge/rebase/revert/cherry-pick/bisect), a nonstandard `core.worktree`, an
+existing `.shared` entry, or content colliding with the new layout — and
+`--force` does not bypass those hard rejections. Shared branch and stash
+reflogs stay in the shared database; only the worktree's own `HEAD` reflog
+moves.
 
 ## Commands
 
@@ -137,18 +144,26 @@ Creates a wrapper directory, clones the repo as bare into `.bare`, writes the
 
 Converts an existing regular clone into a gitree wrapper layout. Runs
 extensive pre-flight checks (clean working tree, no untracked files, fsck
-clean, local-only branch detection) before performing a single atomic
-`rename(.git -> .bare)`.
+clean, local-only branch detection, plus hard rejects for states it cannot
+preserve — initialized submodules, split-index, `extensions.worktreeConfig`,
+in-progress operations, nonstandard `core.worktree`, an existing `.shared`
+entry, layout collisions). Hard rejections apply even with `--force`.
 
 ### `gitree add <branch> [--new] [--base <ref>]`
 
 Creates a worktree for `<branch>` in the wrapper directory. Symlinks all
-`.shared/` files into the new worktree.
+`.shared/` entries into the new worktree (skipping paths tracked in the
+worktree's index, so pending deletions are never replaced by symlinks).
 
 - Without `--new`: the branch must exist (locally or on `origin`). If only on
-  `origin`, a tracking local branch is created automatically.
+  `origin`, a tracking local branch is created automatically. Upstream
+  tracking (`branch.<name>.remote`/`.merge`) is configured when the branch
+  has an `origin/<name>` counterpart, so plain `git pull`/`git push` work.
 - With `--new`: creates a new branch. The base ref defaults to the current
   worktree's HEAD, or `main`/`master` if at the wrapper level.
+- Re-running `add` for a branch whose worktree already exists is safe: it
+  completes any missing `.shared` links (so an interrupted run can simply
+  be retried). `--new` on an existing worktree still fails.
 
 Tab-completes existing branch names (requires shell completion to be
 installed).
@@ -170,7 +185,9 @@ local branches.
 
 Each argument may be a plain branch name, a directory-style name
 (`branch/`, as offered by shell completion), or the worktree's path
-(relative or absolute).
+(relative or absolute). Arguments are resolved against git's worktree
+registry, so the *registered* worktree is removed even if ordinary git
+operations left the branch checked out in a differently named directory.
 
 ### `gitree prune`
 
@@ -203,16 +220,23 @@ Prints the wrapper root directory.
 ### `gitree pull [--all] [--branch <name>] [--autostash]`
 
 Fetches from origin and fast-forwards the main worktree (or a specified
-branch's worktree) if it is clean. If the worktree is dirty, the error names
-the branch and path. Use `--autostash` to stash uncommitted changes before
-merging and pop them afterwards.
+branch's worktree) if it is clean. If the worktree is dirty and there is
+something to pull, the error names the branch and path. Use `--autostash`
+to stash uncommitted changes before merging and pop them afterwards. If
+the changes cannot be reapplied cleanly, gitree fails loudly and the stash
+is kept — a conflicted autostash is never reported as success. Branches
+that are ahead of origin (diverged) fail with a clear error; an
+already-up-to-date branch is reported and left untouched.
 
 With `--all`, every worktree that is behind its origin branch is
 fast-forwarded. Dirty worktrees are skipped (with a note) unless
-`--autostash` is given, which applies autostash per worktree. Worktrees that
-are ahead of or diverged from origin are skipped and reported; branches
-without an `origin/<branch>` upstream are ignored. `--all` cannot be
-combined with `--branch`.
+`--autostash` is given, which applies autostash per worktree. Worktrees
+that are ahead of or diverged from origin are skipped and reported, as are
+worktrees whose branch changed since the listing; branches without an
+`origin/<branch>` upstream are ignored. `--all` cannot be combined with
+`--branch`. Merge options inherited from `branch.<name>.mergeOptions` (e.g.
+`--squash`) are neutralized per invocation so a fast-forward always moves
+HEAD.
 
 ### `gitree foreach <command> [--parallel] [--only <glob>]`
 
@@ -224,20 +248,31 @@ gitree foreach --parallel 'cargo test'
 gitree foreach --only 'feature/*' 'make lint'
 ```
 
+Sequential mode (default) runs worktrees in listing order and stops at the
+first failure. `--parallel` uses a bounded worker pool (at most one worker
+per core); output is buffered per worktree and printed grouped after all
+commands finish, and failures are aggregated.
+
 ### `gitree status`
 
 Shows an overview of all worktrees: branch, path, dirty count, ahead/behind
-relative to origin.
+relative to origin. A worktree that cannot be inspected (missing directory,
+corrupt index) is annotated with an error instead of silently reporting
+zeros — in text as `(error: …)`, in JSON as a non-null `error` field.
 
 ### `gitree doctor`
 
 Health check: git installed? `.bare/` exists? `.git` file correct? `git fsck`
-clean? `.shared/` exists?
+clean? `.shared/` exists? Exits non-zero when any check fails, so scripts
+can gate on it.
 
 ### `gitree clean [--force]`
 
-Prunes stale worktree references, fetches with `--prune`, and identifies local
-branches whose remote counterpart is gone. Use `--force` to delete them.
+Prunes stale worktree references, fetches with `--prune`, and identifies
+local branches whose **configured upstream** is gone. Branches that were
+never pushed (no upstream configured) are never considered stale. The
+listing marks whether each branch is fully merged; `--force` prefers the
+safe delete and only discards unmerged commits explicitly.
 
 ### `gitree env <shell> [--alias <name>]`
 
@@ -257,23 +292,25 @@ wrapper root:
 
 1. Place shared files in `.shared/` (e.g. `.shared/.env`).
 2. Every `gitree add` automatically symlinks all `.shared/` entries into the
-   new worktree.
+   new worktree. Links are relative and point at the shared entry's name, so
+   the wrapper can be moved and retargeted freely.
 3. One source of truth — editing in one worktree changes it everywhere.
 
-### The trailing-slash gotcha
+gitree refuses to link a shared path that is tracked in a worktree's index
+(including pending deletions and sparse-checkout skips), and warns when a
+linked entry is **not effectively ignored** in that worktree — an ignore
+rule must exist in the worktree's own `.gitignore` (or `.git/info/exclude`
+/ `core.excludesFile`); the wrapper-level `.gitignore` is invisible from
+inside worktrees. Verify with `git check-ignore <name>` from a worktree.
 
-If your `.gitignore` uses trailing slashes for directories:
+Two entries are treated specially:
 
-```
-.myconfig/
-```
-
-Git will **not** match symlinks to directories (it treats symlinks as files).
-gitree warns you about this after each `add`. Fix: remove the trailing slash:
-
-```
-.myconfig
-```
+- `.shared/.gitignore` is never linked: Git deliberately does not follow
+  symlinked `.gitignore` files, so sharing it would silently disable those
+  rules.
+- Shared files are still ordinary local files. Sharing mutable dependency
+  directories (`node_modules`, build output) makes every worktree write the
+  same state — usually not what you want.
 
 ## Daily workflow
 

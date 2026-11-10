@@ -72,7 +72,7 @@ pub enum Commands {
     /// Print a `cd` command for switching to a worktree.
     ///
     /// Usage: `eval "$(gitree switch <branch>)"` or use `gitree env` for
-    /// a `gtsw` shell function that changes directory natively.
+    /// a `gtrsw` shell function that changes directory natively.
     #[command(alias = "sw")]
     Switch(SwitchArgs),
 
@@ -239,7 +239,8 @@ pub struct WhereArgs {
 #[derive(Args, Debug)]
 pub struct PullArgs {
     /// Fast-forward every worktree that is behind its origin branch.
-    /// Dirty worktrees are skipped unless `--autostash` is given.
+    /// Dirty, diverged, or branch-switched worktrees are skipped (with a
+    /// note) unless `--autostash` is given for the dirty case.
     #[arg(long, conflicts_with = "branch")]
     pub all: bool,
 
@@ -247,7 +248,9 @@ pub struct PullArgs {
     #[arg(long)]
     pub branch: Option<String>,
 
-    /// Stash uncommitted changes before merging, pop afterwards.
+    /// Stash uncommitted changes before merging, pop afterwards. If the
+    /// changes cannot be reapplied cleanly, the stash is kept and the
+    /// command fails so the conflict is not missed.
     #[arg(long)]
     pub autostash: bool,
 }
@@ -258,7 +261,11 @@ pub struct ForeachArgs {
     /// Command to run (passed to `sh -c`).
     pub command: String,
 
-    /// Run in parallel using threads.
+    /// Run in parallel using a bounded worker pool (at most one worker
+    /// per core). Output is buffered and printed grouped per worktree
+    /// after all commands finish; failures are aggregated. Without this
+    /// flag, worktrees run sequentially in listing order and execution
+    /// stops at the first failure.
     #[arg(long)]
     pub parallel: bool,
 

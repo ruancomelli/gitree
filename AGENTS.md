@@ -45,11 +45,9 @@ cargo build
 # Build (release)
 cargo build --release
 
-# Run all tests (unit + integration)
+# Run all tests (unit tests live in the binary crate, integration tests
+# in tests/)
 cargo test
-
-# Run only unit tests
-cargo test --lib
 
 # Run only integration tests
 cargo test --test integration
@@ -92,7 +90,7 @@ src/
 ├── status.rs          # `gitree status` — overview with dirty/ahead/behind
 ├── doctor.rs          # `gitree doctor` — health check
 ├── clean.rs           # `gitree clean` — prune + delete stale branches
-├── env.rs             # `gitree env <shell>` — shell integration (gt, gtsw)
+├── env.rs             # `gitree env <shell>` — shell integration (gtr, gtrsw)
 ├── shared.rs          # .shared/ symlink fan-out + gitignore gotcha detection
 ├── completions.rs     # Shell completion (bash/zsh/fish + dynamic branch completion), manpage generation
 └── format.rs          # ColorPolicy, WorktreeRow, text/JSON rendering
@@ -168,9 +166,15 @@ common git/gitree flags. All other commands (`init`, `migrate`, `prune`,
 ### Shell integration
 
 `src/env.rs` generates shell scripts for bash/zsh/fish/posix. The `gtr()`
-function is a dispatcher: `gtr sw <branch>` does native `cd` (via `eval`),
-everything else passes through to `gitree`. The `gtrsw` alias is `gtr sw`.
-The function name is configurable via `gitree env <shell> --alias <name>`.
+function is a dispatcher: `gtr sw <branch>` changes directory natively by
+passing the destination *as data* — it fetches the path from `gitree where`
+and `cd`s to it. **No shell code is ever evaluated** (`eval` of `gitree
+switch` output and fish `source` of POSIX-quoted `cd` output are not safe:
+fish cannot consume POSIX-quoted paths). `gtr sw --help`/`-h` and any
+dashed first argument pass through to `gitree switch` untouched. The
+`gtrsw` alias is `gtr sw`. The function name is configurable via
+`gitree env <shell> --alias <name>` (reserved words and `cd`/`gitree` are
+rejected).
 
 Each env script also wires up completions so `gtr`/`gtrsw` reuse the rules
 installed by `gitree completion <shell>`:
@@ -187,8 +191,10 @@ installed by `gitree completion <shell>`:
 
 - **Git-style output:** clean, unindented lines. No boxes, panels, or
   excessive decoration.
-- **Color:** respect `NO_COLOR`, `CLICOLOR_FORCE`. Use `ColorPolicy` enum
-  (`Always`, `Never`, `Auto`). Auto-detect TTY via `std::io::IsTerminal`.
+- **Color:** respect `NO_COLOR` and `CLICOLOR_FORCE` (handled inside
+  `ColorPolicy::should_color`; an explicit `--color <always|never>` wins).
+  Auto-detect TTY via `std::io::IsTerminal`. Write errors from renderers
+  propagate — never swallow them.
 - **Errors to stderr,** data to stdout. Errors formatted as `error: <msg>`
   with optional `hint: <msg>` lines.
 - **No emojis** unless explicitly requested by the user.
@@ -241,12 +247,26 @@ installed by `gitree completion <shell>`:
 - **Always do:** Run `cargo fmt && cargo clippy --all-targets -- -D warnings
   && cargo test` after making changes. Add tests for new functionality.
 - **Always do:** Use the validated `BranchName` type for every
-  user-supplied branch name (`add`, `remove`, `switch`, `where`,
-  `pull --branch`) before it reaches git or a filesystem path — never pass
-  raw strings to git. This also blocks path traversal out of the wrapper.
-  For `remove`, `switch`, and `where`, resolve the argument with
-  `Wrapper::resolve_branch_arg` so directory-style names (`branch/`) and
-  worktree paths are accepted, not just plain branch names.
+  user-supplied branch name (`add`, `pull --branch`) before it reaches git
+  or a filesystem path — never pass raw strings to git. This also blocks
+  path traversal out of the wrapper. For `remove`, `switch`, and `where`,
+  resolve the argument with `Wrapper::resolve_worktree` and act on the
+  registered worktree's branch *and* path — never reconstruct a path from
+  the branch name (branches are not durable worktree identities).
+- **Always do:** Use fully qualified refs (`refs/heads/<name>`,
+  `refs/remotes/origin/<name>`) for revision resolution and comparisons;
+  short names can be shadowed by tags. The one exception is the
+  `start_point` of `worktree add` for an existing local branch: a
+  fully-qualified ref there would detach the worktree.
+- **Always do:** Treat git's success exit status as insufficient: capture
+  stderr on successful merges (autostash conflicts exit zero), verify HEAD
+  actually moved after a fast-forward, and revalidate a worktree's current
+  branch immediately before mutating it.
+- **Never do:** Route completion candidates through `compgen -W "$(...)"`
+  — `-W` performs shell expansion on its word list. Match candidates
+  literally.
+- **Never do:** Eval or `source` generated `gitree switch` output in
+  shell integration; pass destinations as data (`gitree where`).
 - **Always do:** Add new `git` operations as methods on `Git` in `git.rs`.
 - **Ask first:** Before adding new dependencies to `Cargo.toml`.
 - **Ask first:** Before changing the MSRV (`rust-version`).
@@ -275,6 +295,12 @@ installed by `gitree completion <shell>`:
   commits that inherit the shared database's config.
 - The `create_gitree_repo()` helper in `tests/integration.rs` builds a source
   repo and runs `gitree init` — reuse it for new tests.
+- Assertion quality: prefer asserting *state* (HEAD, refs, index, stash
+  count, registered paths) over output text. `doctor` must be asserted by
+  exit status; text like `ok` alone proves nothing.
+- Add hostile-name coverage (branches containing `$(...)`, quotes,
+  spaces-adjacent characters) wherever an argument crosses into a shell,
+  a path, or a git ref.
 - **Add tests for every new command or behavior.** Tests are not optional.
 
 ## Maintaining this file

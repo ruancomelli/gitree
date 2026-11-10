@@ -19,10 +19,14 @@ pub struct Check {
 
 /// Runs the `doctor` command.
 ///
+/// All check results are printed. The command exits non-zero when any
+/// check fails, so scripts can gate on it.
+///
 /// # Errors
 ///
-/// Returns an error only for unrecoverable failures (not for individual check
-/// failures, which are reported as results).
+/// Returns an error when at least one health check failed. Individual
+/// check failures are reported in the printed results, not as early
+/// returns.
 pub fn run(wrapper: &Wrapper) -> Result<()> {
     let checks = vec![
         check_bare_dir(wrapper),
@@ -35,7 +39,7 @@ pub fn run(wrapper: &Wrapper) -> Result<()> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    let mut all_passed = true;
+    let mut failed = 0usize;
     for check in &checks {
         let status = if check.passed { "ok" } else { "FAIL" };
         let _ = write!(out, "{:<10}  {}", status, check.name);
@@ -44,17 +48,19 @@ pub fn run(wrapper: &Wrapper) -> Result<()> {
         }
         let _ = writeln!(out);
         if !check.passed {
-            all_passed = false;
+            failed += 1;
         }
     }
 
-    if all_passed {
+    if failed == 0 {
         let _ = writeln!(out, "\nAll checks passed.");
-    } else {
-        let _ = writeln!(out, "\nSome checks failed. See messages above.");
+        return Ok(());
     }
 
-    Ok(())
+    let _ = writeln!(out, "\n{failed} check(s) failed. See messages above.");
+    Err(GitreeError::Other(format!(
+        "{failed} health check(s) failed"
+    )))
 }
 
 fn check_bare_dir(wrapper: &Wrapper) -> Check {

@@ -2656,3 +2656,23 @@ fn add_refuses_to_share_gitignore() {
 // `gitree doctor` — exit status
 // ---------------------------------------------------------------------------
 
+#[test]
+fn doctor_fails_when_wrapper_broken() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    fs::remove_dir_all(wrapper.join(".bare")).unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["doctor"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("FAIL"))
+        .stderr(predicate::str::contains("health check(s) failed"));
+}
+
+// ---------------------------------------------------------------------------
+// `gitree foreach`
+// ---------------------------------------------------------------------------
+

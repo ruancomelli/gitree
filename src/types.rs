@@ -44,36 +44,48 @@ impl BranchName {
         if name.is_empty() {
             return Err(GitreeError::Other("branch name is empty".into()));
         }
-        if name.starts_with('-') || name.starts_with('.') {
+        if name.starts_with('-') || name.starts_with('/') {
             return Err(GitreeError::Other(format!(
-                "branch name '{name}' must not start with '-' or '.'"
+                "branch name '{name}' must not start with '-' or '/'"
             )));
         }
-        if name.ends_with('/') {
+        if name.ends_with('/') || name.ends_with('.') {
             return Err(GitreeError::Other(format!(
-                "branch name '{name}' must not end with '/'"
+                "branch name '{name}' must not end with '/' or '.'"
             )));
         }
-        if name.ends_with(".lock") {
-            return Err(GitreeError::Other(format!(
-                "branch name '{name}' must not end with '.lock'"
-            )));
+        if name == "@" {
+            return Err(GitreeError::Other(
+                "branch name '@' is reserved by git".into(),
+            ));
+        }
+        for component in name.split('/') {
+            if component.is_empty() {
+                return Err(GitreeError::Other(format!(
+                    "branch name '{name}' must not contain '//'"
+                )));
+            }
+            if component.starts_with('.') {
+                return Err(GitreeError::Other(format!(
+                    "branch name '{name}' must not contain a component starting with '.'"
+                )));
+            }
+            if component.ends_with(".lock") {
+                return Err(GitreeError::Other(format!(
+                    "branch name '{name}' must not contain a component ending with '.lock'"
+                )));
+            }
         }
         for (i, ch) in name.chars().enumerate() {
-            if matches!(ch, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\') {
+            if matches!(ch, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\') || ch.is_control() {
                 return Err(GitreeError::Other(format!(
-                    "branch name '{name}' contains invalid character '{ch}' at position {i}"
+                    "branch name '{name}' contains invalid character at position {i}"
                 )));
             }
         }
         if name.contains("..") {
             return Err(GitreeError::Other(format!(
                 "branch name '{name}' must not contain '..'"
-            )));
-        }
-        if name.contains("//") {
-            return Err(GitreeError::Other(format!(
-                "branch name '{name}' must not contain '//'"
             )));
         }
         if name.contains("@{") {
@@ -188,6 +200,7 @@ mod tests {
         assert!(BranchName::new("main").is_ok());
         assert!(BranchName::new("feature/my-feature").is_ok());
         assert!(BranchName::new("release-1.0").is_ok());
+        assert!(BranchName::new("trailing.dot").is_ok());
         assert!(BranchName::new("bugfix/fix-issue-123").is_ok());
     }
 
@@ -203,6 +216,19 @@ mod tests {
         assert!(BranchName::new("branch~name").is_err());
         assert!(BranchName::new("branch:name").is_err());
         assert!(BranchName::new("branch.lock").is_err());
+        assert!(BranchName::new("topic$(id)").is_ok());
+    }
+
+    #[test]
+    fn invalid_branch_names_absolutes_and_components() {
+        assert!(BranchName::new("/etc").is_err());
+        assert!(BranchName::new("../escape").is_err());
+        assert!(BranchName::new("@").is_err());
+        assert!(BranchName::new("a/b.lock/c").is_err());
+        assert!(BranchName::new("a/./b").is_err());
+        assert!(BranchName::new("trailing.").is_err());
+        assert!(BranchName::new("with\nnewline").is_err());
+        assert!(BranchName::new("at@{block").is_err());
     }
 
     #[test]

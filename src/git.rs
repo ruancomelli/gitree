@@ -412,12 +412,48 @@ impl Git {
 
     /// Returns parsed `git worktree list --porcelain` output.
     ///
+    /// Prefers NUL-delimited output (`--porcelain -z`) so worktree paths
+    /// containing newlines cannot corrupt the record structure. Older git
+    /// versions without `-z` fall back to newline-delimited parsing.
+    ///
     /// # Errors
     ///
-    /// Returns an error if git fails.
+    /// Returns an error if git fails, or if a worktree path is not valid
+    /// UTF-8 (non-UTF-8 paths cannot be represented losslessly through the
+    /// argument and gitfile interfaces gitree uses, so they are rejected
+    /// instead of guessed at).
     pub fn worktree_list(&self) -> Result<Vec<WorktreeEntry>> {
-        let out = self.run(&["worktree", "list", "--porcelain"])?;
-        Ok(WorktreeEntry::parse(&out))
+        match self.run_bytes(&["worktree", "list", "--porcelain", "-z"]) {
+            Ok(bytes) => Ok(WorktreeEntry::parse_z(&Self::utf8(bytes)?)),
+            Err(_) => {
+                let out = self.run(&["worktree", "list", "--porcelain"])?;
+                Ok(WorktreeEntry::parse(&out))
+            }
+        }
+    }
+
+    /// Runs a git command, returning raw stdout bytes on success.
+    fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>> {
+        let output = self.exec(args, &[])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(GitreeError::GitFailed {
+                summary: format!("git {}", args.join(" ")),
+                stderr,
+            });
+        }
+        Ok(output.stdout)
+    }
+
+    /// Converts command output bytes to UTF-8, rejecting invalid input.
+    fn utf8(bytes: Vec<u8>) -> Result<String> {
+        String::from_utf8(bytes).map_err(|_| {
+            GitreeError::Other(
+                "git output contains a path that is not valid UTF-8 — \
+                 refusing to guess at the bytes"
+                    .into(),
+            )
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -747,66 +783,97 @@ impl WorktreeEntry {
     /// Parses `git worktree list --porcelain` output.
     #[must_use]
     pub fn parse(output: &str) -> Vec<Self> {
-        let mut entries = Vec::new();
-        let mut current: Option<Self> = None;
-
+        let mut parser = Parser::default();
         for line in output.lines() {
             if line.is_empty() {
-                if let Some(entry) = current.take() {
-                    entries.push(entry);
-                }
+                parser.flush();
                 continue;
             }
             let (key, value) = line.split_once(' ').unwrap_or((line, ""));
-            match key {
-                "worktree" => {
-                    if let Some(entry) = current.take() {
-                        entries.push(entry);
-                    }
-                    current = Some(Self {
-                        path: PathBuf::from(value),
-                        head: None,
-                        branch: None,
-                        bare: false,
-                        locked: false,
-                        prunable: false,
-                    });
-                }
-                "HEAD" => {
-                    if let Some(ref mut entry) = current {
-                        entry.head = Some(value.to_string());
-                    }
-                }
-                "branch" => {
-                    if let Some(ref mut entry) = current {
-                        entry.branch = value
-                            .strip_prefix("refs/heads/")
-                            .map(String::from)
-                            .or_else(|| Some(value.to_string()));
-                    }
-                }
-                "bare" => {
-                    if let Some(ref mut entry) = current {
-                        entry.bare = true;
-                    }
-                }
-                "locked" => {
-                    if let Some(ref mut entry) = current {
-                        entry.locked = true;
-                    }
-                }
-                "prunable" => {
-                    if let Some(ref mut entry) = current {
-                        entry.prunable = true;
-                    }
-                }
-                _ => {}
+            parser.attribute(key, value);
+        }
+        parser.flush();
+        parser.entries
+    }
+
+    /// Parses NUL-delimited `git worktree list --porcelain -z` output.
+    ///
+    /// Records are separated by an empty NUL-token, so paths containing
+    /// newlines are preserved intact.
+    #[must_use]
+    pub fn parse_z(output: &str) -> Vec<Self> {
+        let mut parser = Parser::default();
+        for token in output.split('\0') {
+            if token.is_empty() {
+                parser.flush();
+                continue;
             }
+            let (key, value) = token.split_once(' ').unwrap_or((token, ""));
+            parser.attribute(key, value);
         }
-        if let Some(entry) = current {
-            entries.push(entry);
+        parser.flush();
+        parser.entries
+    }
+}
+
+/// Incremental parser shared by [`WorktreeEntry::parse`] and
+/// [`WorktreeEntry::parse_z`].
+#[derive(Default)]
+struct Parser {
+    current: Option<WorktreeEntry>,
+    entries: Vec<WorktreeEntry>,
+}
+
+impl Parser {
+    fn flush(&mut self) {
+        if let Some(entry) = self.current.take() {
+            self.entries.push(entry);
         }
-        entries
+    }
+
+    fn attribute(&mut self, key: &str, value: &str) {
+        match key {
+            "worktree" => {
+                self.flush();
+                self.current = Some(WorktreeEntry {
+                    path: PathBuf::from(value),
+                    head: None,
+                    branch: None,
+                    bare: false,
+                    locked: false,
+                    prunable: false,
+                });
+            }
+            "HEAD" => {
+                if let Some(ref mut entry) = self.current {
+                    entry.head = Some(value.to_string());
+                }
+            }
+            "branch" => {
+                if let Some(ref mut entry) = self.current {
+                    entry.branch = value
+                        .strip_prefix("refs/heads/")
+                        .map(String::from)
+                        .or_else(|| Some(value.to_string()));
+                }
+            }
+            "bare" => {
+                if let Some(ref mut entry) = self.current {
+                    entry.bare = true;
+                }
+            }
+            "locked" => {
+                if let Some(ref mut entry) = self.current {
+                    entry.locked = true;
+                }
+            }
+            "prunable" => {
+                if let Some(ref mut entry) = self.current {
+                    entry.prunable = true;
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -957,5 +1024,34 @@ mod tests {
         assert!(entries[1].prunable && entries[1].locked);
         assert!(!entries[2].prunable);
         assert!(!entries[2].locked);
+    }
+
+    #[test]
+    fn parse_z_single_worktree() {
+        let input = "worktree /home/p/main\0HEAD abc123\0branch refs/heads/main\0\0";
+        let entries = WorktreeEntry::parse_z(input);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, PathBuf::from("/home/p/main"));
+        assert_eq!(entries[0].head.as_deref(), Some("abc123"));
+        assert_eq!(entries[0].branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn parse_z_multiple_worktrees() {
+        let input = "worktree /p/.bare\0bare\0\0worktree /p/main\0HEAD abc\0branch refs/heads/main\0locked reason\0\0";
+        let entries = WorktreeEntry::parse_z(input);
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].bare);
+        assert!(entries[1].locked);
+        assert_eq!(entries[1].branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn parse_z_preserves_path_with_newline() {
+        let input = "worktree /p/we\nird\0HEAD abc\0\0worktree /p/main\0HEAD def\0\0";
+        let entries = WorktreeEntry::parse_z(input);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, PathBuf::from("/p/we\nird"));
+        assert_eq!(entries[1].path, PathBuf::from("/p/main"));
     }
 }

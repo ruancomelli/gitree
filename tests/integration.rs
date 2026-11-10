@@ -2254,3 +2254,63 @@ fn migrate_preserves_untracked_files_with_force() {
 // `gitree clean` — deletion eligibility
 // ---------------------------------------------------------------------------
 
+#[test]
+fn clean_retains_never_pushed_branches() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    // A branch that was never pushed has no upstream at all. "No
+    // same-name remote branch" must not be read as "abandoned".
+    git(&wrapper, &["branch", "unpushed"]);
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["clean", "--force"])
+        .assert()
+        .success();
+
+    let branches = git(&wrapper.join(".bare"), &["branch", "--list"]);
+    assert!(
+        branches.contains("unpushed"),
+        "never-pushed branch must survive clean --force: {branches}"
+    );
+}
+
+#[test]
+fn clean_deletes_upstream_gone_branch() {
+    let (_tmp, wrapper) = create_gitree_repo();
+    let src = _tmp.path().join("source.git");
+
+    // `stale` exists on the remote; create the local counterpart and
+    // configure the upstream (as a normal `git push -u` would have).
+    git(&src, &["branch", "stale"]);
+    git(&wrapper, &["fetch", "origin"]);
+    git(&wrapper, &["branch", "stale", "origin/stale"]);
+    git(&wrapper, &["config", "branch.stale.remote", "origin"]);
+    git(
+        &wrapper,
+        &["config", "branch.stale.merge", "refs/heads/stale"],
+    );
+
+    // Then delete it on the remote, so fetch --prune marks it gone.
+    git(&src, &["branch", "-D", "stale"]);
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["clean", "--force"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Deleted: stale"));
+
+    let branches = git(&wrapper.join(".bare"), &["branch", "--list"]);
+    assert!(
+        !branches.contains("stale"),
+        "upstream-gone branch should be deleted: {branches}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `gitree pull` — truthful outcomes
+// ---------------------------------------------------------------------------
+

@@ -1,7 +1,7 @@
-//! `gitree clean` — remove stale worktrees and delete branches gone from remote.
+//! `gitree clean` — remove stale worktrees and delete branches whose
+//! configured upstream is gone.
 
 use std::collections::HashSet;
-use std::io::Write;
 
 use crate::error::{GitreeError, Result};
 use crate::repo::Wrapper;
@@ -17,12 +17,16 @@ pub struct CleanOptions {
 ///
 /// 1. Prunes stale worktree references.
 /// 2. Fetches and prunes remote-tracking refs (`git fetch --prune`).
-/// 3. Identifies local branches whose remote counterpart is gone.
+/// 3. Identifies local branches whose *configured upstream* is gone.
 /// 4. Offers to delete them (interactive unless `--force`).
+///
+/// Branches that were never pushed (no upstream configured) are never
+/// considered stale: "no same-name remote branch" is not evidence that a
+/// branch was abandoned.
 ///
 /// # Errors
 ///
-/// Returns an error if git fails.
+/// Returns an error if git fails or any branch deletion fails.
 pub fn run(wrapper: &Wrapper, opts: CleanOptions) -> Result<()> {
     let git = wrapper.git();
 
@@ -40,8 +44,8 @@ pub fn run(wrapper: &Wrapper, opts: CleanOptions) -> Result<()> {
         )));
     }
 
-    // Find local branches whose remote is gone and that have no active
-    // worktree.
+    // Stale = the branch's configured upstream no longer exists, and the
+    // branch has no active worktree.
     let worktrees = git.worktree_list()?;
     let active_branches: HashSet<&str> = worktrees
         .iter()
@@ -49,9 +53,10 @@ pub fn run(wrapper: &Wrapper, opts: CleanOptions) -> Result<()> {
         .collect();
 
     let stale: Vec<String> = git
-        .local_only_branches()?
+        .upstream_states()?
         .into_iter()
-        .filter(|b| !active_branches.contains(b.as_str()))
+        .filter(|b| b.upstream.is_some() && b.gone && !active_branches.contains(b.name.as_str()))
+        .map(|b| b.name)
         .collect();
 
     if stale.is_empty() {
@@ -61,23 +66,43 @@ pub fn run(wrapper: &Wrapper, opts: CleanOptions) -> Result<()> {
 
     eprintln!("\nFound {} stale branch(es):", stale.len());
     for b in &stale {
-        eprintln!("  {b}");
+        let merged = match git.branch_merged_into_head(b) {
+            Ok(true) => "fully merged",
+            Ok(false) => "has unmerged commits",
+            Err(_) => "merged status unknown",
+        };
+        eprintln!("  {b} ({merged})");
     }
 
-    if opts.force {
-        eprintln!("\nDeleting (--force) …");
-        for b in &stale {
-            match git.branch_delete(b, true) {
-                Ok(()) => eprintln!("  Deleted: {b}"),
-                Err(e) => eprintln!("  Failed to delete {b}: {e}"),
+    if !opts.force {
+        eprintln!("\nUse --force to delete them.");
+        return Ok(());
+    }
+
+    eprintln!("\nDeleting (--force) …");
+    let mut failures = Vec::new();
+    for b in &stale {
+        // Prefer the safe delete (refuses to discard unmerged commits);
+        // only fall back to -D because --force was given explicitly.
+        match git.branch_delete(b, false) {
+            Ok(()) => eprintln!("  Deleted: {b}"),
+            Err(_) => {
+                eprintln!("  {b} is not fully merged — force-deleting");
+                match git.branch_delete(b, true) {
+                    Ok(()) => eprintln!("  Force-deleted: {b}"),
+                    Err(e) => failures.push(format!("{b}: {e}")),
+                }
             }
         }
-    } else {
-        eprintln!("\nUse --force to delete them.");
     }
 
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
-    let _ = writeln!(out);
+    if !failures.is_empty() {
+        return Err(GitreeError::Other(format!(
+            "failed to delete {} branch(es): {}",
+            failures.len(),
+            failures.join("; ")
+        )));
+    }
+
     Ok(())
 }

@@ -202,7 +202,12 @@ impl Git {
     }
 
     /// Returns the list of local branches that have no corresponding remote
-    /// branch on origin.
+    /// branch on `origin`.
+    ///
+    /// Note: the absence of a same-name `origin/<branch>` counterpart does
+    /// **not** mean the branch is stale — it may simply never have been
+    /// pushed. Use [`Git::upstream_states`] when "the configured upstream
+    /// was deleted" is the question.
     ///
     /// # Errors
     ///
@@ -217,7 +222,45 @@ impl Git {
             .collect())
     }
 
+    /// Returns the upstream tracking state of every local branch.
+    ///
+    /// `gone` is `true` when the branch has a configured upstream whose
+    /// remote-tracking ref no longer exists (typically because the branch
+    /// was deleted on the remote).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git fails.
+    pub fn upstream_states(&self) -> Result<Vec<UpstreamState>> {
+        let out = self.run(&[
+            "for-each-ref",
+            "--format=%(refname:short)%00%(upstream:short)%00%(upstream:track)",
+            "refs/heads",
+        ])?;
+        Ok(out
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split('\0');
+                let name = parts.next()?;
+                if name.is_empty() {
+                    return None;
+                }
+                let upstream = parts.next().unwrap_or_default();
+                let track = parts.next().unwrap_or_default();
+                Some(UpstreamState {
+                    name: name.to_string(),
+                    upstream: (!upstream.is_empty()).then(|| upstream.to_string()),
+                    gone: track.contains("gone"),
+                })
+            })
+            .collect())
+    }
+
     /// Returns ahead/behind counts relative to `origin/<branch>`.
+    ///
+    /// Fully qualified refs are used so that tags or local branches named
+    /// like `origin/<branch>` cannot shadow the tracking ref during
+    /// revision resolution.
     ///
     /// Returns `None` when the branch has no upstream on `origin`, and the
     /// `(ahead, behind)` counts otherwise.
@@ -249,6 +292,25 @@ impl Git {
         let behind = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
         let ahead = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
         Ok(Some((ahead, behind)))
+    }
+
+    /// Returns `true` if the branch is an ancestor of HEAD (i.e. fully
+    /// merged into the current default branch).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git fails for a reason other than "not an
+    /// ancestor" (which is reported as `false`).
+    pub fn branch_merged_into_head(&self, branch: &str) -> Result<bool> {
+        let output = self.exec(&["merge-base", "--is-ancestor", branch, "HEAD"], &[])?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(GitreeError::GitFailed {
+                summary: format!("git merge-base --is-ancestor {branch} HEAD"),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            }),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -512,6 +574,18 @@ pub struct BranchSet {
     pub remote: Vec<String>,
 }
 
+/// The upstream tracking state of a local branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpstreamState {
+    /// The branch name (without `refs/heads/`).
+    pub name: String,
+    /// The configured upstream (e.g. `origin/main`), if any.
+    pub upstream: Option<String>,
+    /// Whether git reports the upstream as gone (its remote-tracking ref
+    /// no longer exists).
+    pub gone: bool,
+}
+
 /// A single entry from `git worktree list --porcelain`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeEntry {
@@ -675,12 +749,18 @@ mod tests {
     /// Runs a git command, failing the test on non-zero exit.
     ///
     /// Prepends `-c commit.gpgsign=false` so no test commit ever touches a
-    /// signing agent, regardless of repo or global git config.
+    /// signing agent, and sets an explicit author/committer identity so the
+    /// test never depends on global git configuration.
     fn run_git(dir: &Path, args: &[&str]) {
         let output = std::process::Command::new("git")
             .current_dir(dir)
             .args(["-c", "commit.gpgsign=false"])
             .args(args)
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GPG_TTY", "")
             .output()
             .unwrap();
         assert!(

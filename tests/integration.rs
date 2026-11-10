@@ -2040,3 +2040,217 @@ fn completion_powershell_unchanged() {
     let script = std::str::from_utf8(&output).unwrap();
     assert!(!script.contains("gitree __complete"));
 }
+
+// ---------------------------------------------------------------------------
+// `gitree migrate` — state preservation and rejection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn migrate_rejects_initialized_submodules() {
+    let (_tmp, clone) = create_regular_clone();
+
+    fs::write(
+        clone.join(".gitmodules"),
+        "[submodule \"sub\"]\n\tpath = sub\n\turl = ../sub.git\n",
+    )
+    .unwrap();
+    git(&clone, &["add", ".gitmodules"]);
+    git(&clone, &["commit", "-m", "declare submodule"]);
+    // An initialized submodule keeps its repository under .git/modules.
+    fs::create_dir_all(clone.join(".git/modules/sub")).unwrap();
+    fs::write(
+        clone.join(".git/modules/sub/HEAD"),
+        "ref: refs/heads/main\n",
+    )
+    .unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&clone)
+        .args(["migrate", "--yes", "--force"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("submodule"));
+
+    // The repository is untouched.
+    assert!(clone.join(".git").is_dir());
+    assert!(!clone.join(".bare").exists());
+}
+
+#[test]
+fn migrate_rejects_in_progress_operations() {
+    let (_tmp, clone) = create_regular_clone();
+
+    fs::write(clone.join(".git/MERGE_HEAD"), "0123456789abcdef\n").unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&clone)
+        .args(["migrate", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("in progress"));
+
+    assert!(clone.join(".git").is_dir());
+    assert!(!clone.join(".bare").exists());
+}
+
+#[test]
+fn migrate_rejects_split_index() {
+    let (_tmp, clone) = create_regular_clone();
+
+    fs::write(clone.join(".git/sharedindex.0123abcd"), "").unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&clone)
+        .args(["migrate", "--yes", "--force"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("split-index"));
+
+    assert!(clone.join(".git").is_dir());
+    assert!(!clone.join(".bare").exists());
+}
+
+#[test]
+fn migrate_rejects_worktree_config() {
+    let (_tmp, clone) = create_regular_clone();
+
+    git(&clone, &["config", "extensions.worktreeConfig", "true"]);
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&clone)
+        .args(["migrate", "--yes", "--force"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("worktreeConfig"));
+
+    assert!(clone.join(".git").is_dir());
+    assert!(!clone.join(".bare").exists());
+}
+
+#[test]
+fn migrate_rejects_existing_shared_dir() {
+    let (_tmp, clone) = create_regular_clone();
+
+    // An existing project directory with that name must never be
+    // silently adopted as gitree's sharing directory.
+    fs::create_dir(clone.join(".shared")).unwrap();
+    fs::write(clone.join(".shared").join("asset.txt"), "project data\n").unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&clone)
+        .args(["migrate", "--yes", "--force"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(".shared"));
+
+    assert!(clone.join(".git").is_dir());
+    assert!(!clone.join(".bare").exists());
+    assert!(clone.join(".shared").join("asset.txt").exists());
+}
+
+#[test]
+fn migrate_rejects_worktree_state_name_collision() {
+    let (_tmp, clone) = create_regular_clone();
+
+    // The per-worktree state directory is named after the clone's
+    // basename; a pre-existing entry with that name would collide.
+    let base = clone.file_name().unwrap().to_str().unwrap().to_string();
+    fs::create_dir_all(clone.join(".git/worktrees").join(&base)).unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&clone)
+        .args(["migrate", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("collides"));
+
+    assert!(clone.join(".git").is_dir());
+    assert!(!clone.join(".bare").exists());
+}
+
+#[test]
+fn migrate_rejects_nonempty_main_dir() {
+    let (_tmp, clone) = create_regular_clone();
+
+    fs::create_dir_all(clone.join("main")).unwrap();
+    fs::write(clone.join("main").join("existing.txt"), "precious\n").unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&clone)
+        .args(["migrate", "--yes", "--force"])
+        .assert()
+        .failure();
+
+    // Original layout untouched.
+    assert!(clone.join(".git").is_dir());
+    assert!(!clone.join(".bare").exists());
+    assert_eq!(
+        fs::read_to_string(clone.join("main").join("existing.txt")).unwrap(),
+        "precious\n"
+    );
+}
+
+#[test]
+fn migrate_preserves_stash_and_branch_reflog() {
+    let (_tmp, clone) = create_regular_clone();
+
+    // Create a stash (a commit + reflog entry in the common dir).
+    fs::write(clone.join("README.md"), "wip\n").unwrap();
+    git(&clone, &["stash", "push", "-m", "wip-work"]);
+    let stash_before = git(&clone, &["stash", "list"]);
+    assert!(stash_before.contains("wip-work"));
+
+    // The branch reflog has at least the clone/checkout entry.
+    let reflog_before = git(&clone, &["reflog", "show", "main"]);
+    assert!(!reflog_before.is_empty());
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&clone)
+        .args(["migrate", "--yes", "--force"])
+        .assert()
+        .success();
+
+    // The stash must still be reachable from the migrated layout.
+    let stash_after = git(&clone.join("main"), &["stash", "list"]);
+    assert_eq!(stash_after, stash_before, "stash must survive migration");
+
+    // Branch reflogs are shared database state and must remain intact.
+    let reflog_after = git(&clone.join("main"), &["reflog", "show", "main"]);
+    assert!(
+        !reflog_after.is_empty(),
+        "branch reflog must survive migration"
+    );
+}
+
+#[test]
+fn migrate_preserves_untracked_files_with_force() {
+    let (_tmp, clone) = create_regular_clone();
+
+    fs::write(clone.join("notes.txt"), "precious untracked notes\n").unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&clone)
+        .args(["migrate", "--yes", "--force"])
+        .assert()
+        .success();
+
+    let moved = clone.join("main").join("notes.txt");
+    assert_eq!(
+        fs::read_to_string(&moved).unwrap(),
+        "precious untracked notes\n"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `gitree clean` — deletion eligibility
+// ---------------------------------------------------------------------------
+

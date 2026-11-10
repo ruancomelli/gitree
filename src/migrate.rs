@@ -98,21 +98,27 @@ struct PreflightReport {
 
 /// Per-worktree transient files that belong to a single worktree (not shared
 /// across worktrees). These are moved from `.bare/` into the worktree's state
-/// directory during the main→linked conversion.
+/// directory during the main→linked conversion. In-progress operation state
+/// (merge/revert/cherry-pick/bisect) is rejected during pre-flight instead
+/// of being migrated, because only part of it (e.g. the sequencer) lives in
+/// the common directory.
 const TRANSIENT_FILES: &[&str] = &[
     "COMMIT_EDITMSG",
     "FETCH_HEAD",
     "ORIG_HEAD",
     "REBASE_HEAD",
+    "AUTO_GC",
+];
+
+/// Repository states that migration cannot preserve reliably. These are
+/// hard failures — `--force` does not bypass them.
+const IN_PROGRESS_DIRS: &[&str] = &["sequencer", "rebase-merge", "rebase-apply"];
+const IN_PROGRESS_FILES: &[&str] = &[
     "MERGE_HEAD",
-    "MERGE_MSG",
-    "MERGE_MODE",
+    "MERGE_AUTOSTASH",
     "REVERT_HEAD",
     "CHERRY_PICK_HEAD",
     "BISECT_LOG",
-    "BISECT_NAMES",
-    "BISECT_TERMS",
-    "AUTO_GC",
 ];
 
 fn preflight(git: &Git, cwd: &Path, opts: &MigrateOptions) -> Result<PreflightReport> {
@@ -157,6 +163,70 @@ fn preflight(git: &Git, cwd: &Path, opts: &MigrateOptions) -> Result<PreflightRe
              unlock with `git worktree unlock <path>` first",
             names.join(", ")
         )));
+    }
+
+    // Check 2b: the main worktree must be the migration root. A clone with
+    // a nonstandard `core.worktree` keeps its actual checkout elsewhere;
+    // relocating from CWD would assign the wrong index to the wrong tree.
+    let main_resolved = main_wt_path
+        .canonicalize()
+        .unwrap_or_else(|_| main_wt_path.clone());
+    let cwd_resolved = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    if main_resolved != cwd_resolved {
+        return Err(GitreeError::PreflightFailed(format!(
+            "the main worktree is at {} but migration was started in {} — \
+             migration only supports standard clones (unset core.worktree first)",
+            main_wt_path.display(),
+            cwd.display()
+        )));
+    }
+
+    // Check 2c: states migration cannot preserve.
+    reject_unsupported_state(&git_dir_path, cwd)?;
+
+    // Check 2d: the per-worktree state directory for the main branch is
+    // named after the directory basename. If `.git/worktrees/` already
+    // holds that name, the conversion would collide — detect this before
+    // any file is moved.
+    let state_name = cwd_resolved
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| main_branch.replace('/', "-"));
+    let worktrees_dir = git_dir_path.join("worktrees");
+    if worktrees_dir.join(&state_name).symlink_metadata().is_ok() {
+        return Err(GitreeError::PreflightFailed(format!(
+            "the worktree state name '{state_name}' (derived from the directory \
+             basename) collides with an existing entry in {} — rename the \
+             directory or the conflicting worktree first",
+            worktrees_dir.display()
+        )));
+    }
+
+    // Check 2e: the destination directory for the main worktree must not
+    // hold project content. It is created by the migration; an existing
+    // non-empty directory (or symlink) would either strand tracked files
+    // or redirect moves outside the repository.
+    let main_dir = cwd_resolved.join(main_branch);
+    match main_dir.symlink_metadata() {
+        Ok(meta) if meta.is_dir() => {
+            let is_empty = fs::read_dir(&main_dir)
+                .map(|mut it| it.next().is_none())
+                .unwrap_or(false);
+            if !is_empty {
+                return Err(GitreeError::PreflightFailed(format!(
+                    "{} already exists and is not empty — it would collide with \
+                     the relocated main worktree; move or rename it first",
+                    main_dir.display()
+                )));
+            }
+        }
+        Ok(_) => {
+            return Err(GitreeError::PreflightFailed(format!(
+                "{} exists and is not a directory — refusing to migrate over it",
+                main_dir.display()
+            )));
+        }
+        Err(_) => {}
     }
 
     // Check 3: working tree must be clean.
@@ -221,6 +291,87 @@ fn preflight(git: &Git, cwd: &Path, opts: &MigrateOptions) -> Result<PreflightRe
     })
 }
 
+/// Rejects repository states whose migration cannot be guaranteed.
+///
+/// These checks are hard failures regardless of `--force`: proceeding
+/// would risk silently losing configuration, index state, or in-progress
+/// operations.
+fn reject_unsupported_state(git_dir: &Path, cwd: &Path) -> Result<()> {
+    let git = Git::new(cwd);
+
+    if git
+        .config_get("extensions.worktreeconfig")
+        .is_ok_and(|v| v.is_some())
+    {
+        return Err(GitreeError::PreflightFailed(
+            "extensions.worktreeConfig is enabled — per-worktree configuration \
+             cannot be preserved by this migration"
+                .into(),
+        ));
+    }
+
+    let split_indexes = fs::read_dir(git_dir)?
+        .filter_map(|e| e.ok())
+        .any(|e| e.file_name().to_string_lossy().starts_with("sharedindex."));
+    if split_indexes {
+        return Err(GitreeError::PreflightFailed(
+            "the index uses split-index mode — its backing files would be \
+             separated from the index; disable with `git update-index \
+             --no-split-index` first"
+                .into(),
+        ));
+    }
+
+    if cwd.join(".gitmodules").exists()
+        && git_dir
+            .join("modules")
+            .read_dir()
+            .is_ok_and(|mut it| it.next().is_some())
+    {
+        return Err(GitreeError::PreflightFailed(
+            "initialized submodules cannot be migrated — their repository \
+             pointers would break; deinit submodules first"
+                .into(),
+        ));
+    }
+    if cwd.join(".gitmodules").exists() {
+        eprintln!(
+            "warning: a .gitmodules file exists; uninitialized submodules \
+             will be checked out as empty directories in the new worktree"
+        );
+    }
+
+    for dir in IN_PROGRESS_DIRS {
+        if git_dir.join(dir).is_dir() {
+            return Err(GitreeError::PreflightFailed(format!(
+                "an operation is in progress ({dir} exists) — finish or abort \
+                 it (e.g. `git rebase --abort`, `git cherry-pick --abort`) \
+                 before migrating"
+            )));
+        }
+    }
+    for file in IN_PROGRESS_FILES {
+        if git_dir.join(file).exists() {
+            return Err(GitreeError::PreflightFailed(format!(
+                "an operation is in progress ({file} exists) — finish or abort \
+                 it before migrating"
+            )));
+        }
+    }
+
+    // An existing `.shared` would be silently adopted as gitree's sharing
+    // directory — its contents are project data, not gitree state.
+    if cwd.join(".shared").symlink_metadata().is_ok() {
+        return Err(GitreeError::PreflightFailed(
+            "a .shared entry already exists — gitree reserves that name for \
+             its own sharing directory; move or rename the existing one first"
+                .into(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn print_plan(report: &PreflightReport, cwd: &Path) {
     eprintln!();
     eprintln!("Migration plan:");
@@ -281,9 +432,15 @@ fn print_plan(report: &PreflightReport, cwd: &Path) {
 fn execute(git: &Git, cwd: &Path, report: &PreflightReport) -> Result<()> {
     let bare_path = cwd.join(".bare");
 
-    if bare_path.exists() {
+    if bare_path.symlink_metadata().is_ok() {
         return Err(GitreeError::PathExists(bare_path));
     }
+
+    // Pre-scan: compute every destination before the first mutation. Any
+    // collision between a to-be-moved top-level entry and existing content
+    // inside the future main worktree directory must abort before
+    // anything moves.
+    prescan_top_level_collisions(cwd, report)?;
 
     // Phase 1: relocate linked worktrees into cwd/<branch>/ (before the
     // rename, while `git worktree move` still operates on the live .git).
@@ -343,6 +500,40 @@ fn execute(git: &Git, cwd: &Path, report: &PreflightReport) -> Result<()> {
     Ok(())
 }
 
+/// Fails before any mutation if a top-level entry would collide with
+/// existing content inside the future main worktree directory.
+///
+/// The pre-flight already rejects a non-empty `cwd/<main_branch>`, so the
+/// only way to reach a collision here is an I/O race; failing early keeps
+/// the migration abortable with the original layout intact.
+fn prescan_top_level_collisions(cwd: &Path, report: &PreflightReport) -> Result<()> {
+    let skip = skip_top_level_dirs(&report.main_branch, &linked_branches(report));
+    let main_dir = cwd.join(&report.main_branch);
+    let mut collisions = Vec::new();
+
+    for entry in fs::read_dir(cwd)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().into_owned();
+        if skip.contains(&name_str) {
+            continue;
+        }
+        if main_dir.join(&name).symlink_metadata().is_ok() {
+            collisions.push(name_str);
+        }
+    }
+
+    if !collisions.is_empty() {
+        return Err(GitreeError::PreflightFailed(format!(
+            "refusing to migrate: {} collide(s) with existing content in {} — \
+             move or rename them first",
+            collisions.join(", "),
+            main_dir.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Phase 1: moves each linked worktree into `cwd/<branch>/` via
 /// `git worktree move`. Worktrees already at the target are skipped.
 fn relocate_linked_worktrees(git: &Git, cwd: &Path, report: &PreflightReport) -> Result<()> {
@@ -358,12 +549,19 @@ fn relocate_linked_worktrees(git: &Git, cwd: &Path, report: &PreflightReport) ->
         if wt.path == target {
             continue;
         }
-        if target.exists() {
+        // symlink_metadata detects dangling symlinks too, which `exists`
+        // (following symlinks) would miss.
+        if target.symlink_metadata().is_ok() {
             return Err(GitreeError::PreflightFailed(format!(
                 "target path {} already exists — cannot relocate worktree '{branch}' \
                  (move or remove it first)",
                 target.display()
             )));
+        }
+        // Branches with slashes map to nested directories; `git worktree
+        // move` does not create missing parents.
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
         }
         eprintln!(
             "Moving worktree '{branch}' {} → {} …",
@@ -437,7 +635,7 @@ fn convert_main_worktree(
         let entry = entry?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if skip.iter().any(|s| *s == name_str) {
+        if skip.iter().any(|s| s.as_str() == name_str) {
             continue;
         }
         let dest = main_dir.join(&name);
@@ -466,7 +664,7 @@ fn convert_main_worktree(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| main_branch.replace('/', "-"));
     let wt_state = bare.join("worktrees").join(&state_name);
-    if wt_state.exists() {
+    if wt_state.symlink_metadata().is_ok() {
         return Err(GitreeError::PreflightFailed(format!(
             "worktree state directory {} already exists — \
              the branch basename '{state_name}' collides with an existing \
@@ -489,14 +687,15 @@ fn convert_main_worktree(
         fs::rename(&bare_index, wt_state.join("index"))?;
     }
 
-    // logs/: move the contents into the worktree's logs/ (only logs/HEAD is
-    // truly per-worktree, but moving the whole tree preserves all reflogs).
-    let bare_logs = bare.join("logs");
-    let wt_logs = wt_state.join("logs");
-    if bare_logs.exists() {
-        fs::create_dir_all(&wt_logs)?;
-        move_dir_contents(&bare_logs, &wt_logs)?;
-        let _ = fs::remove_dir_all(&bare_logs);
+    // Reflogs: only logs/HEAD belongs to this worktree. Branch reflogs
+    // (logs/refs/heads/…) and the stash reflog (logs/refs/stash) are
+    // resolved through the *common* directory by git, so they must stay
+    // in .bare — moving them would hide stash history and leave older
+    // stash objects without their reflog-based GC protection.
+    let bare_logs_head = bare.join("logs").join("HEAD");
+    if bare_logs_head.exists() {
+        fs::create_dir_all(wt_state.join("logs"))?;
+        fs::rename(&bare_logs_head, wt_state.join("logs").join("HEAD"))?;
     }
 
     // Transient per-worktree files.
@@ -555,22 +754,6 @@ fn skip_top_level_dirs(main_branch: &str, linked_branches: &[&str]) -> Vec<Strin
         }
     }
     skip
-}
-
-/// Moves every entry of `src` into `dest` (which must exist and be writable).
-fn move_dir_contents(src: &Path, dest: &Path) -> Result<()> {
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let target = dest.join(entry.file_name());
-        fs::rename(entry.path(), &target).map_err(|e| {
-            GitreeError::PreflightFailed(format!(
-                "failed to move {} → {}: {e}",
-                entry.path().display(),
-                target.display()
-            ))
-        })?;
-    }
-    Ok(())
 }
 
 /// Phase 8: links `.shared/` items into each worktree directory.
@@ -744,23 +927,5 @@ mod tests {
         assert!(skip.iter().any(|s| s == "feature"));
         assert!(skip.iter().any(|s| s == "add-version-command"));
         assert!(!skip.iter().any(|s| s == "src"));
-    }
-
-    #[test]
-    fn move_dir_contents_moves_all_entries() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let src = tmp.path().join("src");
-        let dest = tmp.path().join("dest");
-        fs::create_dir_all(&src).unwrap();
-        fs::create_dir_all(&dest).unwrap();
-        fs::write(src.join("a"), "1").unwrap();
-        fs::create_dir_all(src.join("sub")).unwrap();
-        fs::write(src.join("sub").join("b"), "2").unwrap();
-
-        move_dir_contents(&src, &dest).unwrap();
-
-        assert!(dest.join("a").exists());
-        assert!(dest.join("sub").join("b").exists());
-        assert!(!src.join("a").exists());
     }
 }

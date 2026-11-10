@@ -2676,3 +2676,106 @@ fn doctor_fails_when_wrapper_broken() {
 // `gitree foreach`
 // ---------------------------------------------------------------------------
 
+#[test]
+fn foreach_runs_in_worktrees() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["foreach", "pwd"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            wrapper.join("main").to_str().unwrap(),
+        ));
+}
+
+#[test]
+fn foreach_sequential_fails_on_error() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["foreach", "exit 7"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("exit code 7"));
+}
+
+#[test]
+fn foreach_only_filters_worktrees() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "feature/test", "--new"])
+        .assert()
+        .success();
+
+    // No match: nothing runs, so even a failing command cannot fail.
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["foreach", "--only", "nomatch/*", "exit 1"])
+        .assert()
+        .success();
+
+    // Matched subset runs in the matched worktrees only.
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["foreach", "--only", "feature/*", "pwd"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            wrapper.join("feature/test").to_str().unwrap(),
+        ));
+}
+
+#[test]
+fn foreach_parallel_reports_failures() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["foreach", "--parallel", "exit 3"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("exit code 3"));
+}
+
+// ---------------------------------------------------------------------------
+// Registered-worktree identity (branch/dir decoupling)
+// ---------------------------------------------------------------------------
+

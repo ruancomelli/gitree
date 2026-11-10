@@ -2,6 +2,8 @@
 
 use std::io::Write;
 use std::process::Command;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::error::GitreeError;
 use crate::error::Result;
@@ -92,66 +94,43 @@ fn format_header(branch: &str, path_display: &str) -> String {
 }
 
 fn run_parallel(worktrees: &[&WorktreeEntry], command: &str) -> Result<()> {
-    let results: Vec<ThreadResult> = std::thread::scope(|s| {
-        let handles: Vec<_> = worktrees
-            .iter()
-            .map(|wt| {
-                let branch = wt.branch.as_deref().unwrap_or("(detached)").to_string();
-                let path = wt.path.clone();
-                let path_display = path.display().to_string();
-                let cmd = command.to_string();
-                s.spawn(move || -> ThreadResult {
-                    let output = Command::new("sh")
-                        .arg("-c")
-                        .arg(&cmd)
-                        .current_dir(&path)
-                        .output();
-                    match output {
-                        Ok(output) if output.status.success() => ThreadResult {
-                            branch,
-                            path_display,
-                            stdout: output.stdout,
-                            stderr: output.stderr,
-                            error: None,
-                        },
-                        Ok(output) => ThreadResult {
-                            branch: branch.clone(),
-                            path_display,
-                            stdout: output.stdout,
-                            stderr: output.stderr,
-                            error: Some(format!(
-                                "command failed in '{branch}' with exit code {}",
-                                output.status.code().unwrap_or(-1)
-                            )),
-                        },
-                        Err(e) => ThreadResult {
-                            branch,
-                            path_display,
-                            stdout: Vec::new(),
-                            stderr: Vec::new(),
-                            error: Some(format!("failed to spawn: {e}")),
-                        },
-                    }
-                })
-            })
-            .collect();
+    // Bounded concurrency: at most one worker per available core. A
+    // thread per worktree would spawn one process per worktree regardless
+    // of machine size and buffer every command's output in memory.
+    let max_workers = std::thread::available_parallelism()
+        .map_or(4, std::num::NonZeroUsize::get)
+        .min(worktrees.len().max(1));
 
-        handles
-            .into_iter()
-            .map(|h| {
-                h.join().unwrap_or_else(|_| ThreadResult {
-                    branch: "(unknown)".into(),
-                    path_display: "(unknown)".into(),
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
-                    error: Some("thread panicked".into()),
-                })
-            })
-            .collect()
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<Option<ThreadResult>>> =
+        Mutex::new((0..worktrees.len()).map(|_| None).collect());
+
+    std::thread::scope(|s| {
+        for _ in 0..max_workers {
+            s.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::SeqCst);
+                    if index >= worktrees.len() {
+                        break;
+                    }
+                    let wt = worktrees[index];
+                    let result = run_in_worktree(wt, command);
+                    let mut guard = results
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    guard[index] = Some(result);
+                }
+            });
+        }
     });
 
     let mut had_error = false;
-    for result in &results {
+    for result in results
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .into_iter()
+        .flatten()
+    {
         eprintln!("{}", format_header(&result.branch, &result.path_display));
         if !result.stdout.is_empty() {
             let _ = std::io::stdout().write_all(&result.stdout);
@@ -171,6 +150,45 @@ fn run_parallel(worktrees: &[&WorktreeEntry], command: &str) -> Result<()> {
         ))
     } else {
         Ok(())
+    }
+}
+
+/// Runs the command in a single worktree, capturing output.
+fn run_in_worktree(wt: &WorktreeEntry, command: &str) -> ThreadResult {
+    let branch = wt.branch.as_deref().unwrap_or("(detached)").to_string();
+    let path = wt.path.clone();
+    let path_display = path.display().to_string();
+
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(&path)
+        .output();
+    match output {
+        Ok(output) if output.status.success() => ThreadResult {
+            branch,
+            path_display,
+            stdout: output.stdout,
+            stderr: output.stderr,
+            error: None,
+        },
+        Ok(output) => ThreadResult {
+            stdout: output.stdout,
+            stderr: output.stderr,
+            error: Some(format!(
+                "command failed in '{branch}' with exit code {}",
+                output.status.code().unwrap_or(-1)
+            )),
+            branch,
+            path_display,
+        },
+        Err(e) => ThreadResult {
+            branch,
+            path_display,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            error: Some(format!("failed to spawn: {e}")),
+        },
     }
 }
 

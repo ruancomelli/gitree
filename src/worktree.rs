@@ -1,6 +1,6 @@
 //! `gitree add`, `gitree remove`, `gitree list`, `gitree prune`, `gitree where`.
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::{GitreeError, Result};
@@ -29,82 +29,130 @@ pub struct AddOptions {
 ///
 /// # Errors
 ///
-/// Returns an error if the branch already has a worktree, if the branch
-/// doesn't exist and `--new` was not passed, or if git or filesystem
-/// operations fail.
+/// Returns an error if the branch already has a worktree and `--new` was
+/// passed, if the branch doesn't exist and `--new` was not passed, or if
+/// git or filesystem operations fail.
+///
+/// When a worktree for the branch already exists (and `--new` was not
+/// passed), the command is idempotent: it completes any missing `.shared`
+/// links instead of failing, so an interrupted `add` can simply be
+/// re-run.
 pub fn run_add(wrapper: &Wrapper, opts: AddOptions) -> Result<()> {
     let branch = BranchName::new(&opts.branch)?;
     let branch_str = branch.as_str();
     let git = wrapper.git();
-
-    // Check if a worktree already exists for this branch.
-    let worktrees = git.worktree_list()?;
-    if worktrees
-        .iter()
-        .any(|wt| wt.branch.as_deref() == Some(branch_str))
-    {
-        return Err(GitreeError::WorktreeExists(opts.branch));
-    }
-
     let worktree_path = wrapper.worktree_path(branch_str);
 
-    // Determine the base ref for `--new`.
-    let base_ref: Option<String> = if opts.new {
-        match &opts.base {
-            Some(b) => Some(b.clone()),
-            None => Some(determine_base_ref(
-                &git,
-                wrapper,
-                &std::env::current_dir()?,
-            )?),
+    let worktrees = git.worktree_list()?;
+    if let Some(existing) = worktrees
+        .iter()
+        .find(|wt| wt.branch.as_deref() == Some(branch_str))
+    {
+        if opts.new {
+            return Err(GitreeError::WorktreeExists(opts.branch));
         }
+        eprintln!(
+            "Worktree for '{branch_str}' already exists at {} — completing .shared links",
+            existing.path.display()
+        );
+        return complete_shared_links(wrapper, existing.path.as_path());
+    }
+
+    // Determine what to check out.
+    let (new_branch, start_point): (Option<&str>, Option<String>) = if opts.new {
+        let base = match &opts.base {
+            Some(b) => b.clone(),
+            None => determine_base_ref(&git, wrapper, &std::env::current_dir()?)?,
+        };
+        (Some(branch_str), Some(base))
     } else {
-        // For existing branch: if only remote, create a tracking local.
+        // For an existing branch: check out the local one, or create a
+        // tracking branch from origin. Fully qualified refs avoid tag
+        // shadowing during revision resolution.
         let branches = git.branches()?;
         let has_local = branches.local.iter().any(|b| b == branch_str);
         let has_remote = branches.remote.iter().any(|b| b == branch_str);
-        if !has_local && !has_remote {
+        if has_local {
+            // `worktree add <path> refs/heads/<branch>` would DETACH the
+            // worktree, so the plain branch name is required here. A tag
+            // with the same name would win revision resolution and also
+            // detach — fail loudly instead.
+            if git.tag_exists(branch_str)? {
+                return Err(GitreeError::Other(format!(
+                    "a tag named '{branch_str}' shadows the branch —                      delete or rename the tag first"
+                )));
+            }
+            (None, Some(branch_str.to_string()))
+        } else if has_remote {
+            (
+                Some(branch_str),
+                Some(format!("refs/remotes/origin/{branch_str}")),
+            )
+        } else {
             return Err(GitreeError::BranchNotFound(opts.branch));
         }
-        None
     };
 
     eprintln!(
-        "Adding worktree for branch '{branch}' at {path} …",
-        branch = branch_str,
-        path = worktree_path.as_path().display()
+        "Adding worktree for branch '{branch_str}' at {} …",
+        worktree_path.as_path().display()
     );
 
-    git.worktree_add(
-        worktree_path.as_path(),
-        branch_str,
-        opts.new,
-        base_ref.as_deref(),
-    )?;
+    git.worktree_add(worktree_path.as_path(), new_branch, start_point.as_deref())?;
 
-    // Link .shared/ items.
-    if wrapper.has_shared_dir() {
-        let results = shared::link_shared(&wrapper.shared_dir(), worktree_path.as_path())?;
-        for result in &results {
-            match result {
-                shared::LinkResult::Linked(name) => eprintln!("  Linked: {name}"),
-                shared::LinkResult::Skipped(name) => eprintln!("  Skipped (exists): {name}"),
-            }
+    // Establish upstream tracking when the branch has an origin
+    // counterpart: a bare clone does not set it up, and plain
+    // `git pull`/`git push` need it. Never touched for `--new` branches.
+    if !opts.new
+        && let Ok(None) = git.config_get(&format!("branch.{branch_str}.remote"))
+    {
+        let has_remote = git.remote_branches()?.iter().any(|b| b == branch_str);
+        if has_remote && let Err(e) = git.set_branch_upstream(branch_str) {
+            eprintln!("warning: could not set upstream tracking: {e}");
         }
     }
 
-    // Check gitignore for trailing-slash gotchas.
-    let gitignore = worktree_path.as_path().join(".gitignore");
-    let warnings = shared::check_gitignore_trailing_slash(&gitignore)?;
-    for (pattern, _) in &warnings {
-        eprintln!(
-            "warning: gitignore pattern '{pattern}' has a trailing slash — \
-             symlinks to directories may show as untracked. Remove the slash."
-        );
-    }
+    complete_shared_links(wrapper, worktree_path.as_path())?;
 
     eprintln!();
     eprintln!("Worktree ready: {}", worktree_path.as_path().display());
+    Ok(())
+}
+
+/// Links `.shared/` entries into `worktree_path` and reports shared entries
+/// that are not effectively ignored in that worktree.
+fn complete_shared_links(wrapper: &Wrapper, worktree_path: &Path) -> Result<()> {
+    if !wrapper.has_shared_dir() {
+        return Ok(());
+    }
+    let shared_git = wrapper.git_for(worktree_path);
+    let results = shared::link_shared(&wrapper.shared_dir(), worktree_path, Some(&shared_git))?;
+    for result in &results {
+        match result {
+            shared::LinkResult::Linked(name) => eprintln!("  Linked: {name}"),
+            shared::LinkResult::Skipped(name) => eprintln!("  Skipped (exists): {name}"),
+            shared::LinkResult::SkippedTracked(name) => eprintln!(
+                "  Skipped (tracked): {name} — the path is tracked in this worktree's index"
+            ),
+            shared::LinkResult::Unshareable(name) => eprintln!(
+                "  Skipped (unshareable): {name} — Git does not follow symlinked .gitignore files"
+            ),
+        }
+    }
+
+    let linked: Vec<String> = results
+        .iter()
+        .filter_map(|r| match r {
+            shared::LinkResult::Linked(name) => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    for name in shared::check_shared_ignored(&shared_git, &linked)? {
+        eprintln!(
+            "warning: '{name}' is not ignored in this worktree — add it to \
+             .gitignore or .git/info/exclude so the symlink is not committed"
+        );
+    }
     Ok(())
 }
 

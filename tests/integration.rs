@@ -849,7 +849,33 @@ fn pull_rejects_invalid_branch_override() {
 }
 
 #[test]
-fn add_fails_for_duplicate_worktree() {
+fn add_existing_worktree_completes_shared_links() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    // A later shared entry must reach the existing worktree when `add`
+    // is re-run (an interrupted add can simply be retried).
+    fs::write(wrapper.join(".shared").join("extra.cfg"), "value\n").unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("already exists"));
+
+    assert!(wrapper.join("main").join("extra.cfg").is_symlink());
+}
+
+#[test]
+fn add_new_fails_for_existing_worktree() {
     let (_tmp, wrapper) = create_gitree_repo();
 
     AssertCommand::cargo_bin("gitree")
@@ -862,7 +888,7 @@ fn add_fails_for_duplicate_worktree() {
     AssertCommand::cargo_bin("gitree")
         .unwrap()
         .current_dir(&wrapper)
-        .args(["add", "main"])
+        .args(["add", "main", "--new"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("already exists"));
@@ -2420,5 +2446,213 @@ fn pull_single_diverged_fails() {
 
 // ---------------------------------------------------------------------------
 // Upstream tracking setup
+// ---------------------------------------------------------------------------
+
+#[test]
+fn add_sets_upstream_tracking_config() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    // A bare clone does not configure tracking; plain `git pull` and
+    // `git push` need it.
+    let remote = git(&wrapper, &["config", "--get", "branch.main.remote"]);
+    assert_eq!(remote, "origin");
+    let merge = git(&wrapper, &["config", "--get", "branch.main.merge"]);
+    assert_eq!(merge, "refs/heads/main");
+}
+
+#[test]
+fn add_remote_only_branch_creates_tracking_worktree() {
+    let (tmp, wrapper) = create_gitree_repo();
+    let src = tmp.path().join("source.git");
+
+    git(&src, &["branch", "remote-only"]);
+    git(&wrapper, &["fetch", "origin"]);
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "remote-only"])
+        .assert()
+        .success();
+
+    let branch = git(
+        &wrapper.join("remote-only"),
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+    );
+    assert_eq!(branch, "remote-only");
+
+    let tracked = git(&wrapper, &["config", "--get", "branch.remote-only.remote"]);
+    assert_eq!(tracked, "origin");
+}
+
+// ---------------------------------------------------------------------------
+// `.shared/` linking semantics
+// ---------------------------------------------------------------------------
+
+#[test]
+fn add_shared_symlink_is_relative() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    fs::write(wrapper.join(".shared").join(".env"), "FOO=bar\n").unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    // Relative links survive wrapper moves and follow retargeting of the
+    // shared entry itself.
+    let link = fs::read_link(wrapper.join("main").join(".env")).unwrap();
+    assert_eq!(link, std::path::PathBuf::from("../.shared/.env"));
+}
+
+#[test]
+fn add_skips_tracked_shared_names() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("source.git");
+    fs::create_dir(&src).unwrap();
+    git(&src, &["init", "--initial-branch=main"]);
+    git(&src, &["config", "user.email", "test@test.com"]);
+    git(&src, &["config", "user.name", "Test"]);
+    fs::write(src.join("README.md"), "# Test\n").unwrap();
+    fs::write(src.join(".env"), "TRACKED\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "-m", "initial"]);
+
+    let wrapper = tmp.path().join("source");
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(tmp.path())
+        .args(["init", src.to_str().unwrap()])
+        .assert()
+        .success();
+    git(
+        &wrapper.join(".bare"),
+        &["config", "commit.gpgsign", "false"],
+    );
+    git(
+        &wrapper.join(".bare"),
+        &["config", "user.email", "test@test.com"],
+    );
+    git(&wrapper.join(".bare"), &["config", "user.name", "Test"]);
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success();
+
+    // A shared entry with the same name: the tracked file is checked
+    // out. Delete it (unstaged): the index still holds the path, so it
+    // must NOT be replaced by a symlink.
+    fs::write(wrapper.join(".shared").join(".env"), "SHARED\n").unwrap();
+    fs::remove_file(wrapper.join("main").join(".env")).unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("tracked"));
+
+    assert!(
+        !wrapper.join("main").join(".env").exists(),
+        "a tracked path must not be replaced by a shared symlink"
+    );
+    let status = git(&wrapper.join("main"), &["status", "--porcelain"]);
+    assert!(
+        status.contains("D .env"),
+        "pending deletion must remain a deletion: {status}"
+    );
+}
+
+#[test]
+fn add_warns_when_shared_entry_not_ignored() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    fs::write(wrapper.join(".shared").join(".env"), "FOO=bar\n").unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("not ignored"));
+}
+
+#[test]
+fn add_no_warning_when_shared_entry_ignored() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("source.git");
+    fs::create_dir(&src).unwrap();
+    git(&src, &["init", "--initial-branch=main"]);
+    git(&src, &["config", "user.email", "test@test.com"]);
+    git(&src, &["config", "user.name", "Test"]);
+    fs::write(src.join(".gitignore"), ".env\n").unwrap();
+    fs::write(src.join("README.md"), "# Test\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "-m", "initial"]);
+
+    let wrapper = tmp.path().join("source");
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(tmp.path())
+        .args(["init", src.to_str().unwrap()])
+        .assert()
+        .success();
+    git(
+        &wrapper.join(".bare"),
+        &["config", "commit.gpgsign", "false"],
+    );
+    git(
+        &wrapper.join(".bare"),
+        &["config", "user.email", "test@test.com"],
+    );
+    git(&wrapper.join(".bare"), &["config", "user.name", "Test"]);
+
+    fs::write(wrapper.join(".shared").join(".env"), "FOO=bar\n").unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("not ignored").not());
+}
+
+#[test]
+fn add_refuses_to_share_gitignore() {
+    let (_tmp, wrapper) = create_gitree_repo();
+
+    fs::write(wrapper.join(".shared").join(".gitignore"), "node_modules\n").unwrap();
+
+    AssertCommand::cargo_bin("gitree")
+        .unwrap()
+        .current_dir(&wrapper)
+        .args(["add", "main"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("unshareable"));
+
+    // Git does not follow symlinked .gitignore files — linking it would
+    // silently disable the user's rules.
+    assert!(!wrapper.join("main").join(".gitignore").exists());
+}
+
+// ---------------------------------------------------------------------------
+// `gitree doctor` — exit status
 // ---------------------------------------------------------------------------
 

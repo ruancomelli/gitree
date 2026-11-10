@@ -5,7 +5,6 @@ use std::path::Path;
 
 use crate::error::{GitreeError, Result};
 use crate::git::Git;
-use crate::shared;
 
 /// Options for `gitree init`.
 #[derive(Debug, Clone)]
@@ -67,17 +66,13 @@ pub fn run(opts: InitOptions) -> Result<()> {
     eprintln!();
     eprintln!("Next steps:");
     eprintln!("  cd {name}");
-    eprintln!("  gitree add main");
+    // The bare clone copies the remote's default branch; suggest it
+    // instead of hard-coding `main`.
+    let default_branch = git
+        .run(&["symbolic-ref", "--short", "HEAD"])
+        .unwrap_or_else(|_| "main".into());
+    eprintln!("  gitree add {default_branch}");
     eprintln!();
-
-    // Warn about gitignore trailing-slash gotchas.
-    let warnings = shared::check_gitignore_trailing_slash(&gitignore)?;
-    for (pattern, _) in &warnings {
-        eprintln!(
-            "warning: gitignore pattern '{pattern}' has a trailing slash — \
-             symlinks to directories may show as untracked. Remove the slash."
-        );
-    }
 
     Ok(())
 }

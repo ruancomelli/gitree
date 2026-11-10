@@ -58,7 +58,7 @@ impl Git {
     ///
     /// Returns [`GitreeError::GitNotFound`] if git is not on PATH, or
     /// [`GitreeError::GitFailed`] if git exits non-zero.
-    fn run(&self, args: &[&str]) -> Result<String> {
+    pub(crate) fn run(&self, args: &[&str]) -> Result<String> {
         self.run_with(args, &[])
     }
 
@@ -320,29 +320,29 @@ impl Git {
 
     /// Runs `git worktree add`.
     ///
+    /// `new_branch` (if given) is created with `-b`; `start_point` is the
+    /// commit-ish checked out into the new worktree. Passing a fully
+    /// qualified branch ref (e.g. `refs/heads/main`) as `start_point` avoids
+    /// tag shadowing during revision resolution.
+    ///
     /// # Errors
     ///
     /// Returns an error if git fails.
     pub fn worktree_add(
         &self,
         path: &Path,
-        branch: &str,
-        new: bool,
-        base: Option<&str>,
+        new_branch: Option<&str>,
+        start_point: Option<&str>,
     ) -> Result<()> {
         let path_str = path.to_string_lossy();
         let mut args: Vec<&str> = vec!["worktree", "add"];
-        if new {
+        if let Some(branch) = new_branch {
             args.push("-b");
             args.push(branch);
         }
         args.push(&path_str);
-        if new {
-            if let Some(b) = base {
-                args.push(b);
-            }
-        } else {
-            args.push(branch);
+        if let Some(sp) = start_point {
+            args.push(sp);
         }
         self.run(&args)?;
         Ok(())
@@ -518,6 +518,74 @@ impl Git {
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
             }),
         }
+    }
+
+    /// Returns `true` if a tag with the given name exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git fails.
+    pub fn tag_exists(&self, name: &str) -> Result<bool> {
+        Ok(self
+            .run(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/tags/{name}"),
+            ])
+            .is_ok())
+    }
+
+    /// Runs `git check-ignore -q <path>`.
+    ///
+    /// Returns `true` when the path is effectively ignored by any ignore
+    /// source (.gitignore files, `.git/info/exclude`, `core.excludesFile`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git fails for a reason other than "not ignored".
+    pub fn check_ignore(&self, path: &str) -> Result<bool> {
+        let output = self.exec(&["check-ignore", "-q", path], &[])?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(GitreeError::GitFailed {
+                summary: format!("git check-ignore -q {path}"),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            }),
+        }
+    }
+
+    /// Returns `true` if the path is tracked in the worktree's index.
+    ///
+    /// This covers files present in the index regardless of their working
+    /// tree state, so an unstaged deletion or a sparse-checkout skip is
+    /// detected before overwriting the path with e.g. a `.shared` symlink.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git fails.
+    pub fn path_tracked(&self, path: &str) -> Result<bool> {
+        let out = self.run(&["ls-files", "--", path])?;
+        Ok(!out.is_empty())
+    }
+
+    /// Configures the upstream for `branch` on `origin`.
+    ///
+    /// Sets `branch.<name>.remote` and `branch.<name>.merge` (to
+    /// `refs/heads/<name>`), which a bare clone does not establish on its
+    /// own. Existing tracking configuration is left untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git fails.
+    pub fn set_branch_upstream(&self, branch: &str) -> Result<()> {
+        self.config_set(&format!("branch.{branch}.remote"), "origin")?;
+        self.config_set(
+            &format!("branch.{branch}.merge"),
+            &format!("refs/heads/{branch}"),
+        )?;
+        Ok(())
     }
 
     /// Sets a git config value.

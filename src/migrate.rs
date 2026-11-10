@@ -763,8 +763,9 @@ fn link_shared_into_worktrees(cwd: &Path, report: &PreflightReport) -> Result<()
         return Ok(());
     }
     for wt_path in worktree_target_paths(cwd, report) {
-        let results = shared::link_shared(&shared, &wt_path)?;
-        for result in results {
+        let shared_git = Git::new(&wt_path);
+        let results = shared::link_shared(&shared, &wt_path, Some(&shared_git))?;
+        for result in &results {
             match result {
                 shared::LinkResult::Linked(name) => {
                     eprintln!("  {}: linked {name}", wt_path.display());
@@ -772,10 +773,40 @@ fn link_shared_into_worktrees(cwd: &Path, report: &PreflightReport) -> Result<()
                 shared::LinkResult::Skipped(name) => {
                     eprintln!("  {}: skipped {name} (exists)", wt_path.display());
                 }
+                shared::LinkResult::SkippedTracked(name) => {
+                    eprintln!(
+                        "  {}: skipped {name} (tracked in this worktree's index)",
+                        wt_path.display()
+                    );
+                }
+                shared::LinkResult::Unshareable(name) => {
+                    eprintln!(
+                        "  {}: skipped {name} (Git does not follow symlinked .gitignore files)",
+                        wt_path.display()
+                    );
+                }
             }
+        }
+        for name in shared::check_shared_ignored(&shared_git, &linked_names(&results))? {
+            eprintln!(
+                "warning: '{name}' is not ignored in {} — add it to .gitignore \
+                 or .git/info/exclude so the symlink is not committed",
+                wt_path.display()
+            );
         }
     }
     Ok(())
+}
+
+/// Returns the names of the linked results (used for ignore checks).
+fn linked_names(results: &[shared::LinkResult]) -> Vec<String> {
+    results
+        .iter()
+        .filter_map(|r| match r {
+            shared::LinkResult::Linked(name) => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Returns the target paths of every worktree after migration (main + linked).

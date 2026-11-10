@@ -286,10 +286,13 @@ pub fn run_list(wrapper: &Wrapper, opts: ListOptions) -> Result<()> {
         .iter()
         .filter(|e| !e.bare)
         .map(|e| {
-            let dirty = wrapper
-                .git_for(e.path.as_path())
-                .is_dirty()
-                .unwrap_or(false);
+            let dirty = match wrapper.git_for(e.path.as_path()).is_dirty() {
+                Ok(dirty) => dirty,
+                Err(err) => {
+                    eprintln!("warning: could not inspect {}: {err}", e.path.display());
+                    false
+                }
+            };
             WorktreeRow::from_entry(e, dirty, opts.path, &cwd, home_ref)
         })
         .collect();
@@ -301,7 +304,7 @@ pub fn run_list(wrapper: &Wrapper, opts: ListOptions) -> Result<()> {
         format::render_json(&rows, &mut out)?;
     } else {
         let use_color = opts.color.should_color(std::io::stdout().is_terminal());
-        format::render_text(&rows, use_color, &mut out);
+        format::render_text(&rows, use_color, &mut out)?;
     }
 
     Ok(())

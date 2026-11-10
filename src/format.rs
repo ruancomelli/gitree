@@ -21,12 +21,25 @@ pub enum ColorPolicy {
 
 impl ColorPolicy {
     /// Returns `true` if color should be used given `is_tty`.
+    ///
+    /// Environment handling follows the widely adopted conventions:
+    /// `NO_COLOR` (non-empty) disables color for `Auto`, and
+    /// `CLICOLOR_FORCE` (non-`0`) forces it on. An explicit
+    /// `--color <always|never>` still wins for its own value.
     #[must_use]
     pub fn should_color(self, is_tty: bool) -> bool {
         match self {
             Self::Always => true,
             Self::Never => false,
-            Self::Auto => is_tty,
+            Self::Auto => {
+                if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
+                    false
+                } else if std::env::var_os("CLICOLOR_FORCE").is_some_and(|v| v != "0") {
+                    true
+                } else {
+                    is_tty
+                }
+            }
         }
     }
 }
@@ -123,7 +136,15 @@ impl WorktreeRow {
 }
 
 /// Renders the worktree list as plain text (Git-style).
-pub fn render_text(rows: &[WorktreeRow], use_color: bool, out: &mut impl Write) {
+///
+/// # Errors
+///
+/// Returns an error if writing to the output fails.
+pub fn render_text(
+    rows: &[WorktreeRow],
+    use_color: bool,
+    out: &mut impl Write,
+) -> std::io::Result<()> {
     for row in rows {
         let dirty_marker = if row.dirty { " *" } else { "" };
         let branch = if use_color && row.dirty {
@@ -131,12 +152,13 @@ pub fn render_text(rows: &[WorktreeRow], use_color: bool, out: &mut impl Write) 
         } else {
             row.branch.clone()
         };
-        let _ = writeln!(
+        writeln!(
             out,
             "{}  {branch}  {}{dirty_marker}",
             row.head, row.path_str
-        );
+        )?;
     }
+    Ok(())
 }
 
 /// Renders the worktree list as JSON.
@@ -174,7 +196,7 @@ mod tests {
     fn render_text_basic() {
         let rows = sample_rows();
         let mut buf = Vec::new();
-        render_text(&rows, false, &mut buf);
+        render_text(&rows, false, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("main"));
         assert!(output.contains("feature/x"));

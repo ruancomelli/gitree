@@ -1989,12 +1989,16 @@ fn completion_bash_contains_dynamic_overrides() {
         .clone();
 
     let script = std::str::from_utf8(&output).unwrap();
+    assert!(script.contains("_gitree_literal_completions"));
+    assert!(script.contains("gitree __complete \"$ctx\""));
+    // Dynamic candidates must never pass through compgen -W, which
+    // performs shell expansion on its word list (clap's own static flag
+    // completion is unaffected).
     assert!(
-        script.contains("gitree __complete add"),
-        "bash script should reference `gitree __complete add`"
+        !script.contains("compgen -W \"$(gitree"),
+        "bash script must not route branch candidates through compgen -W"
     );
-    assert!(script.contains("gitree __complete base"));
-    assert!(script.contains("gitree __complete \"${sub}\""));
+    assert!(script.contains("COMPREPLY+=("));
     assert!(script.contains("__gitree_clap_orig"));
     assert!(
         script.contains("a) sub=\"add\"")
@@ -2025,7 +2029,12 @@ fn completion_zsh_contains_dynamic_overrides() {
     assert!(script.contains("_gitree_complete_where"));
     assert!(script.contains("_gitree_complete_base"));
     assert!(script.contains("gitree __complete add"));
-    // The _default tag should have been replaced.
+    // The positional tags must be wired to the helpers using the CURRENT
+    // derive help text (a stale prose match silently leaves `_default`).
+    assert!(
+        script.contains("are also accepted:_gitree_complete_remove"),
+        "zsh script should wire the remove positional to its helper"
+    );
     assert!(
         !script.contains("Branch name to create a worktree for:_default"),
         "zsh script should not retain the _default action for add"

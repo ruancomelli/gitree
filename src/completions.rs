@@ -34,7 +34,7 @@ pub fn run_completion(shell: Shell, mut cmd: Command) -> Result<()> {
 
     match shell {
         Shell::Bash => append_bash_overrides(&mut buffer),
-        Shell::Zsh => append_zsh_overrides(&mut buffer)?,
+        Shell::Zsh => append_zsh_overrides(&mut buffer, &cmd)?,
         Shell::Fish => append_fish_overrides(&mut buffer),
         _ => {}
     }
@@ -131,6 +131,11 @@ fn all_branches(git: &Git) -> Vec<String> {
 /// Appends a bash wrapper that intercepts branch positional completion for
 /// `add`/`remove`/`switch`/`where` (and their aliases) and `--base` values,
 /// delegating to `gitree __complete <context>`.
+///
+/// Candidates are matched *literally*. `compgen -W "$(...)"` must never be
+/// used here: `-W` performs shell expansion on its word list, so a branch
+/// name containing `$(...)` (which git accepts) would be evaluated on
+/// every TAB press.
 fn append_bash_overrides(buffer: &mut Vec<u8>) {
     let script = r#"
 
@@ -140,6 +145,21 @@ fn append_bash_overrides(buffer: &mut Vec<u8>) {
 # are completed dynamically via `gitree __complete <context>`.
 if declare -F _gitree >/dev/null 2>&1; then
     eval "$(declare -f _gitree | sed '1s/^[A-Za-z_][A-Za-z0-9_]*/__gitree_clap_orig/')"
+
+    # Fills COMPREPLY literally with the candidates for <context> whose
+    # names start with <cur>. Candidates are treated as data: no parameter
+    # expansion, command substitution, or word splitting is applied.
+    _gitree_literal_completions() {
+        local cur="$1" ctx="$2" line
+        COMPREPLY=()
+        while IFS= read -r line; do
+            [[ -n "$line" ]] || continue
+            case "$line" in
+                "$cur"*) COMPREPLY+=("$line") ;;
+            esac
+        done < <(gitree __complete "$ctx" 2>/dev/null)
+    }
+
     _gitree() {
         local sub="${COMP_WORDS[1]:-}"
         local cur prev
@@ -161,7 +181,7 @@ if declare -F _gitree >/dev/null 2>&1; then
         case "${sub}" in
             add)
                 if [[ "${prev}" == "--base" ]]; then
-                    COMPREPLY=( $(compgen -W "$(gitree __complete base 2>/dev/null)" -- "${cur}") )
+                    _gitree_literal_completions "${cur}" base
                     return 0
                 fi
                 if [[ "${cur}" != -* ]]; then
@@ -172,14 +192,14 @@ if declare -F _gitree >/dev/null 2>&1; then
                         esac
                     done
                     if [[ $has_new -eq 0 ]]; then
-                        COMPREPLY=( $(compgen -W "$(gitree __complete add 2>/dev/null)" -- "${cur}") )
+                        _gitree_literal_completions "${cur}" add
                         return 0
                     fi
                 fi
                 ;;
             remove|switch|where)
                 if [[ "${cur}" != -* ]]; then
-                    COMPREPLY=( $(compgen -W "$(gitree __complete "${sub}" 2>/dev/null)" -- "${cur}") )
+                    _gitree_literal_completions "${cur}" "${sub}"
                     return 0
                 fi
                 ;;
@@ -194,31 +214,36 @@ fi
 /// Appends zsh helper functions and rewrites the generated `_default` action
 /// tags for branch positionals and `--base` so they call those helpers.
 ///
+/// The positional tags are matched against the *current* help strings read
+/// from the built `Command`, so the wiring cannot silently rot when the
+/// derive help text changes.
+///
 /// # Errors
 ///
 /// Returns an error if the generated script is not valid UTF-8.
-fn append_zsh_overrides(buffer: &mut Vec<u8>) -> Result<()> {
+fn append_zsh_overrides(buffer: &mut Vec<u8>, cmd: &Command) -> Result<()> {
     let mut script = String::from_utf8(std::mem::take(buffer))
         .map_err(|e| crate::error::GitreeError::Other(e.to_string()))?;
 
-    // Rewrite the `_default` action for each branch positional and for
-    // `--base` to point at our custom helpers.  Each target substring is
-    // unique within the generated script.
-    script = script
-        .replace(
-            "Branch name to create a worktree for:_default",
-            "Branch name to create a worktree for:_gitree_complete_add",
-        )
-        .replace("BASE:_default", "BASE:_gitree_complete_base")
-        .replace(
-            "Branch name whose worktree to remove:_default",
-            "Branch name whose worktree to remove:_gitree_complete_remove",
-        )
-        .replace(
-            "Branch name to switch to:_default",
-            "Branch name to switch to:_gitree_complete_switch",
-        )
-        .replace("Branch name:_default", "Branch name:_gitree_complete_where");
+    // (subcommand, positional arg id, helper suffix)
+    let targets = [
+        ("add", "branch", "add"),
+        ("remove", "branches", "remove"),
+        ("switch", "branch", "switch"),
+        ("where", "branch", "where"),
+    ];
+    for (sub, arg_id, helper) in targets {
+        if let Some(help) = positional_help(cmd, sub, arg_id) {
+            script = script.replace(
+                &format!("{help}:_default"),
+                &format!("{help}:_gitree_complete_{helper}"),
+            );
+        }
+    }
+
+    // The `--base` value placeholder is derived from the value name, not
+    // the help text, so it is stable.
+    script = script.replace("BASE:_default", "BASE:_gitree_complete_base");
 
     let helpers = r#"
 
@@ -255,6 +280,14 @@ _gitree_complete_base() {
     script.push_str(helpers);
     buffer.extend_from_slice(script.as_bytes());
     Ok(())
+}
+
+/// Returns the help text of a subcommand's positional argument.
+fn positional_help(cmd: &Command, sub: &str, arg_id: &str) -> Option<String> {
+    let sc = cmd.find_subcommand(sub)?;
+    let arg = sc.get_positionals().find(|a| a.get_id() == arg_id)?;
+    let help = arg.get_help()?.to_string();
+    (!help.is_empty()).then_some(help)
 }
 
 /// Appends fish `complete` rules that offer branch names for the relevant
